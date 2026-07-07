@@ -1,3 +1,3 @@
-# Reproducible / experimental artifacts — regenerate with build.py / build_hand.py
-_generated/
+# Experimental (reverted) grasp variants — regenerate with the robust-pick
+# stamping in the session notes if needed.
 graphs/robust_*/
