@@ -1,0 +1,851 @@
+{
+ "version": 3,
+ "meta": {
+  "name": "pick_closest_to_basket",
+  "description": "Reference for a computed referent: perceive the basket and all six candidates, select the one whose center is closest to the basket, and pick-and-place it. The chosen object is derived from the layout, so it changes with the seed."
+ },
+ "nodes": {
+  "basket": {
+   "type": "subgraph",
+   "ref": "basket_sg"
+  },
+  "cand_0": {
+   "type": "subgraph",
+   "ref": "cand_0_sg"
+  },
+  "cand_1": {
+   "type": "subgraph",
+   "ref": "cand_1_sg"
+  },
+  "cand_2": {
+   "type": "subgraph",
+   "ref": "cand_2_sg"
+  },
+  "cand_3": {
+   "type": "subgraph",
+   "ref": "cand_3_sg"
+  },
+  "cand_4": {
+   "type": "subgraph",
+   "ref": "cand_4_sg"
+  },
+  "cand_5": {
+   "type": "subgraph",
+   "ref": "cand_5_sg"
+  },
+  "select": {
+   "type": "subgraph",
+   "ref": "select_sg"
+  },
+  "grasp": {
+   "type": "subgraph",
+   "ref": "grasp_sg"
+  },
+  "transport": {
+   "type": "subgraph",
+   "ref": "transport_sg"
+  },
+  "done": {
+   "type": "end",
+   "status": "success"
+  },
+  "abort": {
+   "type": "end",
+   "status": "failure",
+   "recovery": [
+    {
+     "tool": "robot.open_gripper",
+     "inputs": {}
+    },
+    {
+     "tool": "robot.go_home",
+     "inputs": {}
+    }
+   ]
+  }
+ },
+ "edges": [
+  [
+   "START",
+   "basket"
+  ]
+ ],
+ "conditional_edges": {
+  "basket": {
+   "router_field": "exit",
+   "mapping": {
+    "found": "cand_0",
+    "not_found": "abort"
+   }
+  },
+  "cand_0": {
+   "router_field": "exit",
+   "mapping": {
+    "found": "cand_1",
+    "not_found": "abort"
+   }
+  },
+  "cand_1": {
+   "router_field": "exit",
+   "mapping": {
+    "found": "cand_2",
+    "not_found": "abort"
+   }
+  },
+  "cand_2": {
+   "router_field": "exit",
+   "mapping": {
+    "found": "cand_3",
+    "not_found": "abort"
+   }
+  },
+  "cand_3": {
+   "router_field": "exit",
+   "mapping": {
+    "found": "cand_4",
+    "not_found": "abort"
+   }
+  },
+  "cand_4": {
+   "router_field": "exit",
+   "mapping": {
+    "found": "cand_5",
+    "not_found": "abort"
+   }
+  },
+  "cand_5": {
+   "router_field": "exit",
+   "mapping": {
+    "found": "select",
+    "not_found": "abort"
+   }
+  },
+  "select": {
+   "router_field": "exit",
+   "mapping": {
+    "ready": "grasp",
+    "failed": "abort"
+   }
+  },
+  "grasp": {
+   "router_field": "exit",
+   "mapping": {
+    "grasped": "transport",
+    "failed": "abort"
+   }
+  },
+  "transport": {
+   "router_field": "exit",
+   "mapping": {
+    "placed": "done",
+    "blocked": "abort"
+   }
+  }
+ },
+ "subgraphs": {
+  "basket_sg": {
+   "skill": "perceiving-objects",
+   "inputs": {},
+   "outputs": {
+    "container_obb": {
+     "$ref": "filter_obb.obb"
+    },
+    "anchor_obb": {
+     "$ref": "filter_obb.obb"
+    }
+   },
+   "nodes": {
+    "observe": {
+     "type": "tool",
+     "tool": "robot.get_observation"
+    },
+    "perceive": {
+     "type": "script",
+     "script": "scripts/target/perceive_dino_vlm.py",
+     "inputs": {
+      "cameras": {
+       "$ref": "observe.cameras"
+      },
+      "object_name": "wicker basket"
+     }
+    },
+    "filter_obb": {
+     "type": "tool",
+     "tool": "geometry.filter_and_compute_obb",
+     "inputs": {
+      "points": {
+       "$ref": "perceive.cloud"
+      }
+     }
+    },
+    "found": {
+     "type": "noop"
+    }
+   },
+   "edges": [
+    [
+     "START",
+     "observe"
+    ],
+    [
+     "observe",
+     "perceive"
+    ],
+    [
+     "perceive",
+     "filter_obb"
+    ],
+    [
+     "filter_obb",
+     "found"
+    ],
+    [
+     "found",
+     "END"
+    ]
+   ],
+   "conditional_edges": {},
+   "exit": {
+    "router_field": null,
+    "success_values": [
+     "found"
+    ]
+   },
+   "on_error": "not_found"
+  },
+  "cand_0_sg": {
+   "skill": "perceiving-objects",
+   "inputs": {},
+   "outputs": {
+    "cand_alphabet_soup": {
+     "$ref": "filter_obb.obb"
+    }
+   },
+   "nodes": {
+    "observe": {
+     "type": "tool",
+     "tool": "robot.get_observation"
+    },
+    "perceive": {
+     "type": "script",
+     "script": "scripts/cand/perceive_dino_vlm.py",
+     "inputs": {
+      "cameras": {
+       "$ref": "observe.cameras"
+      },
+      "object_name": "blue and yellow alphabet soup can"
+     }
+    },
+    "filter_obb": {
+     "type": "tool",
+     "tool": "geometry.filter_and_compute_obb",
+     "inputs": {
+      "points": {
+       "$ref": "perceive.cloud"
+      }
+     }
+    },
+    "found": {
+     "type": "noop"
+    }
+   },
+   "edges": [
+    [
+     "START",
+     "observe"
+    ],
+    [
+     "observe",
+     "perceive"
+    ],
+    [
+     "perceive",
+     "filter_obb"
+    ],
+    [
+     "filter_obb",
+     "found"
+    ],
+    [
+     "found",
+     "END"
+    ]
+   ],
+   "conditional_edges": {},
+   "exit": {
+    "router_field": null,
+    "success_values": [
+     "found"
+    ]
+   },
+   "on_error": "not_found"
+  },
+  "cand_1_sg": {
+   "skill": "perceiving-objects",
+   "inputs": {},
+   "outputs": {
+    "cand_butter": {
+     "$ref": "filter_obb.obb"
+    }
+   },
+   "nodes": {
+    "observe": {
+     "type": "tool",
+     "tool": "robot.get_observation"
+    },
+    "perceive": {
+     "type": "script",
+     "script": "scripts/cand/perceive_dino_vlm.py",
+     "inputs": {
+      "cameras": {
+       "$ref": "observe.cameras"
+      },
+      "object_name": "small butter box"
+     }
+    },
+    "filter_obb": {
+     "type": "tool",
+     "tool": "geometry.filter_and_compute_obb",
+     "inputs": {
+      "points": {
+       "$ref": "perceive.cloud"
+      }
+     }
+    },
+    "found": {
+     "type": "noop"
+    }
+   },
+   "edges": [
+    [
+     "START",
+     "observe"
+    ],
+    [
+     "observe",
+     "perceive"
+    ],
+    [
+     "perceive",
+     "filter_obb"
+    ],
+    [
+     "filter_obb",
+     "found"
+    ],
+    [
+     "found",
+     "END"
+    ]
+   ],
+   "conditional_edges": {},
+   "exit": {
+    "router_field": null,
+    "success_values": [
+     "found"
+    ]
+   },
+   "on_error": "not_found"
+  },
+  "cand_2_sg": {
+   "skill": "perceiving-objects",
+   "inputs": {},
+   "outputs": {
+    "cand_cream_cheese": {
+     "$ref": "filter_obb.obb"
+    }
+   },
+   "nodes": {
+    "observe": {
+     "type": "tool",
+     "tool": "robot.get_observation"
+    },
+    "perceive": {
+     "type": "script",
+     "script": "scripts/cand/perceive_dino_vlm.py",
+     "inputs": {
+      "cameras": {
+       "$ref": "observe.cameras"
+      },
+      "object_name": "small cream cheese box"
+     }
+    },
+    "filter_obb": {
+     "type": "tool",
+     "tool": "geometry.filter_and_compute_obb",
+     "inputs": {
+      "points": {
+       "$ref": "perceive.cloud"
+      }
+     }
+    },
+    "found": {
+     "type": "noop"
+    }
+   },
+   "edges": [
+    [
+     "START",
+     "observe"
+    ],
+    [
+     "observe",
+     "perceive"
+    ],
+    [
+     "perceive",
+     "filter_obb"
+    ],
+    [
+     "filter_obb",
+     "found"
+    ],
+    [
+     "found",
+     "END"
+    ]
+   ],
+   "conditional_edges": {},
+   "exit": {
+    "router_field": null,
+    "success_values": [
+     "found"
+    ]
+   },
+   "on_error": "not_found"
+  },
+  "cand_3_sg": {
+   "skill": "perceiving-objects",
+   "inputs": {},
+   "outputs": {
+    "cand_milk": {
+     "$ref": "filter_obb.obb"
+    }
+   },
+   "nodes": {
+    "observe": {
+     "type": "tool",
+     "tool": "robot.get_observation"
+    },
+    "perceive": {
+     "type": "script",
+     "script": "scripts/cand/perceive_dino_vlm.py",
+     "inputs": {
+      "cameras": {
+       "$ref": "observe.cameras"
+      },
+      "object_name": "milk carton"
+     }
+    },
+    "filter_obb": {
+     "type": "tool",
+     "tool": "geometry.filter_and_compute_obb",
+     "inputs": {
+      "points": {
+       "$ref": "perceive.cloud"
+      }
+     }
+    },
+    "found": {
+     "type": "noop"
+    }
+   },
+   "edges": [
+    [
+     "START",
+     "observe"
+    ],
+    [
+     "observe",
+     "perceive"
+    ],
+    [
+     "perceive",
+     "filter_obb"
+    ],
+    [
+     "filter_obb",
+     "found"
+    ],
+    [
+     "found",
+     "END"
+    ]
+   ],
+   "conditional_edges": {},
+   "exit": {
+    "router_field": null,
+    "success_values": [
+     "found"
+    ]
+   },
+   "on_error": "not_found"
+  },
+  "cand_4_sg": {
+   "skill": "perceiving-objects",
+   "inputs": {},
+   "outputs": {
+    "cand_salad_dressing": {
+     "$ref": "filter_obb.obb"
+    }
+   },
+   "nodes": {
+    "observe": {
+     "type": "tool",
+     "tool": "robot.get_observation"
+    },
+    "perceive": {
+     "type": "script",
+     "script": "scripts/cand/perceive_dino_vlm.py",
+     "inputs": {
+      "cameras": {
+       "$ref": "observe.cameras"
+      },
+      "object_name": "salad dressing bottle"
+     }
+    },
+    "filter_obb": {
+     "type": "tool",
+     "tool": "geometry.filter_and_compute_obb",
+     "inputs": {
+      "points": {
+       "$ref": "perceive.cloud"
+      }
+     }
+    },
+    "found": {
+     "type": "noop"
+    }
+   },
+   "edges": [
+    [
+     "START",
+     "observe"
+    ],
+    [
+     "observe",
+     "perceive"
+    ],
+    [
+     "perceive",
+     "filter_obb"
+    ],
+    [
+     "filter_obb",
+     "found"
+    ],
+    [
+     "found",
+     "END"
+    ]
+   ],
+   "conditional_edges": {},
+   "exit": {
+    "router_field": null,
+    "success_values": [
+     "found"
+    ]
+   },
+   "on_error": "not_found"
+  },
+  "cand_5_sg": {
+   "skill": "perceiving-objects",
+   "inputs": {},
+   "outputs": {
+    "cand_tomato_sauce": {
+     "$ref": "filter_obb.obb"
+    }
+   },
+   "nodes": {
+    "observe": {
+     "type": "tool",
+     "tool": "robot.get_observation"
+    },
+    "perceive": {
+     "type": "script",
+     "script": "scripts/cand/perceive_dino_vlm.py",
+     "inputs": {
+      "cameras": {
+       "$ref": "observe.cameras"
+      },
+      "object_name": "tomato sauce can"
+     }
+    },
+    "filter_obb": {
+     "type": "tool",
+     "tool": "geometry.filter_and_compute_obb",
+     "inputs": {
+      "points": {
+       "$ref": "perceive.cloud"
+      }
+     }
+    },
+    "found": {
+     "type": "noop"
+    }
+   },
+   "edges": [
+    [
+     "START",
+     "observe"
+    ],
+    [
+     "observe",
+     "perceive"
+    ],
+    [
+     "perceive",
+     "filter_obb"
+    ],
+    [
+     "filter_obb",
+     "found"
+    ],
+    [
+     "found",
+     "END"
+    ]
+   ],
+   "conditional_edges": {},
+   "exit": {
+    "router_field": null,
+    "success_values": [
+     "found"
+    ]
+   },
+   "on_error": "not_found"
+  },
+  "select_sg": {
+   "skill": "perceiving-objects",
+   "inputs": {
+    "anchor_obb": "OrientedBoundingBox",
+    "cand_alphabet_soup": "OrientedBoundingBox",
+    "cand_butter": "OrientedBoundingBox",
+    "cand_cream_cheese": "OrientedBoundingBox",
+    "cand_milk": "OrientedBoundingBox",
+    "cand_salad_dressing": "OrientedBoundingBox",
+    "cand_tomato_sauce": "OrientedBoundingBox"
+   },
+   "outputs": {
+    "target_obb": {
+     "$ref": "choose.target_obb"
+    }
+   },
+   "nodes": {
+    "choose": {
+     "type": "script",
+     "script": "scripts/select_closest.py",
+     "inputs": {
+      "anchor_obb": {
+       "$ref": "in.anchor_obb"
+      },
+      "cand_alphabet_soup": {
+       "$ref": "in.cand_alphabet_soup"
+      },
+      "cand_butter": {
+       "$ref": "in.cand_butter"
+      },
+      "cand_cream_cheese": {
+       "$ref": "in.cand_cream_cheese"
+      },
+      "cand_milk": {
+       "$ref": "in.cand_milk"
+      },
+      "cand_salad_dressing": {
+       "$ref": "in.cand_salad_dressing"
+      },
+      "cand_tomato_sauce": {
+       "$ref": "in.cand_tomato_sauce"
+      }
+     }
+    },
+    "ready": {
+     "type": "noop"
+    }
+   },
+   "edges": [
+    [
+     "START",
+     "choose"
+    ],
+    [
+     "choose",
+     "ready"
+    ],
+    [
+     "ready",
+     "END"
+    ]
+   ],
+   "conditional_edges": {},
+   "exit": {
+    "router_field": null,
+    "success_values": [
+     "ready"
+    ]
+   },
+   "on_error": "failed"
+  },
+  "grasp_sg": {
+   "skill": "grasping-with-planner",
+   "inputs": {
+    "target_obb": "OrientedBoundingBox"
+   },
+   "outputs": {
+    "ee_pose_at_grasp": {
+     "$ref": "observe.arms.0.ee_pose"
+    }
+   },
+   "nodes": {
+    "open": {
+     "type": "tool",
+     "tool": "robot.open_gripper",
+     "inputs": {
+      "settle_steps": 40
+     }
+    },
+    "compute_grasp": {
+     "type": "tool",
+     "tool": "geometry.top_down_grasp_candidates",
+     "inputs": {
+      "obb": {
+       "$ref": "in.target_obb"
+      },
+      "z_offset": -0.03
+     }
+    },
+    "goto_grasp": {
+     "type": "script",
+     "script": "scripts/grasp_move.py",
+     "inputs": {
+      "grasp_pose": {
+       "$ref": "compute_grasp.candidates.poses.0"
+      },
+      "candidate_poses": {
+       "$ref": "compute_grasp.candidates.poses"
+      },
+      "target_obb": {
+       "$ref": "in.target_obb"
+      },
+      "hover_z": 0.2
+     }
+    },
+    "observe": {
+     "type": "tool",
+     "tool": "robot.get_observation"
+    },
+    "close": {
+     "type": "tool",
+     "tool": "robot.close_gripper",
+     "inputs": {
+      "settle_steps": 60
+     }
+    },
+    "grasped": {
+     "type": "noop"
+    }
+   },
+   "edges": [
+    [
+     "START",
+     "open"
+    ],
+    [
+     "open",
+     "compute_grasp"
+    ],
+    [
+     "compute_grasp",
+     "goto_grasp"
+    ],
+    [
+     "goto_grasp",
+     "observe"
+    ],
+    [
+     "observe",
+     "close"
+    ],
+    [
+     "close",
+     "grasped"
+    ],
+    [
+     "grasped",
+     "END"
+    ]
+   ],
+   "conditional_edges": {},
+   "exit": {
+    "router_field": null,
+    "success_values": [
+     "grasped"
+    ]
+   },
+   "on_error": "failed",
+   "stage": "grasp"
+  },
+  "transport_sg": {
+   "skill": "transporting-objects",
+   "inputs": {
+    "container_obb": "OrientedBoundingBox"
+   },
+   "outputs": {
+    "place_position": {
+     "$ref": "transport_move.place_position"
+    }
+   },
+   "nodes": {
+    "transport_move": {
+     "type": "script",
+     "script": "scripts/transport_move.py",
+     "inputs": {
+      "container_obb": {
+       "$ref": "in.container_obb"
+      },
+      "place_offset": -0.06
+     }
+    },
+    "release": {
+     "type": "script",
+     "script": "scripts/place_release.py",
+     "inputs": {
+      "place_position": {
+       "$ref": "transport_move.place_position"
+      }
+     }
+    },
+    "placed": {
+     "type": "noop"
+    }
+   },
+   "edges": [
+    [
+     "START",
+     "transport_move"
+    ],
+    [
+     "transport_move",
+     "release"
+    ],
+    [
+     "release",
+     "placed"
+    ],
+    [
+     "placed",
+     "END"
+    ]
+   ],
+   "conditional_edges": {},
+   "exit": {
+    "router_field": null,
+    "success_values": [
+     "placed"
+    ]
+   },
+   "on_error": "blocked",
+   "stage": "place"
+  }
+ }
+}

@@ -1,0 +1,383 @@
+{
+  "version": 3,
+  "meta": {
+    "name": "grocery_packing",
+    "description": "Pick up every grocery item on the table and place each in the basket, looping until only the basket remains. Each loop's perceive_next observes the basket AND the next grocery item from one clean pre-grasp viewpoint (a single get_observation), so the basket OBB is never polluted by the extended arm of a post-grasp reperception; grasp then transport places into that freshly-perceived basket."
+  },
+  "nodes": {
+    "perceive_next": {
+      "type": "subgraph",
+      "ref": "perceive_next_sg"
+    },
+    "grasp": {
+      "type": "subgraph",
+      "ref": "grasp_sg"
+    },
+    "transport": {
+      "type": "subgraph",
+      "ref": "transport_sg"
+    },
+    "done": {
+      "type": "end",
+      "status": "success"
+    },
+    "abort": {
+      "type": "end",
+      "status": "failure",
+      "recovery": [
+        {
+          "tool": "robot.open_gripper",
+          "inputs": {}
+        },
+        {
+          "tool": "robot.go_home",
+          "inputs": {}
+        }
+      ]
+    }
+  },
+  "edges": [
+    [
+      "START",
+      "perceive_next"
+    ]
+  ],
+  "conditional_edges": {
+    "perceive_next": {
+      "router_field": "exit",
+      "mapping": {
+        "found": "grasp",
+        "none": "done",
+        "not_found": "abort"
+      }
+    },
+    "grasp": {
+      "router_field": "exit",
+      "mapping": {
+        "grasped": "transport",
+        "failed": "abort"
+      }
+    },
+    "transport": {
+      "router_field": "exit",
+      "mapping": {
+        "placed": "perceive_next",
+        "blocked": "abort"
+      }
+    }
+  },
+  "subgraphs": {
+    "perceive_next_sg": {
+      "skill": "perceiving-objects",
+      "inputs": {},
+      "outputs": {
+        "target_obb": {
+          "$ref": "filter_obb_item.obb"
+        },
+        "target_mask": {
+          "$ref": "perceive_item.mask"
+        },
+        "container_obb": {
+          "$ref": "filter_obb_basket.obb"
+        },
+        "container_mask": {
+          "$ref": "perceive_basket.mask"
+        },
+        "container_cloud": {
+          "$ref": "perceive_basket.cloud"
+        }
+      },
+      "nodes": {
+        "observe": {
+          "type": "tool",
+          "tool": "robot.get_observation"
+        },
+        "exterior_view": {
+          "type": "script",
+          "script": "scripts/exterior_view.py",
+          "inputs": {
+            "cameras": {
+              "$ref": "observe.cameras"
+            }
+          }
+        },
+        "perceive_basket": {
+          "type": "script",
+          "script": "scripts/perceive_dino_vlm.py",
+          "inputs": {
+            "cameras": {
+              "$ref": "exterior_view.cameras"
+            },
+            "object_name": "basket"
+          }
+        },
+        "filter_obb_basket": {
+          "type": "tool",
+          "tool": "geometry.filter_and_compute_obb",
+          "inputs": {
+            "points": {
+              "$ref": "perceive_basket.cloud"
+            }
+          }
+        },
+        "perceive_item": {
+          "type": "script",
+          "script": "scripts/perceive_dino_vlm.py",
+          "inputs": {
+            "cameras": {
+              "$ref": "observe.cameras"
+            },
+            "object_name": "grocery item",
+            "object_description": "a packaged grocery product such as a can, box, carton, jar, or bottle. Never the wicker basket or storage container that the items are being packed into."
+          }
+        },
+        "decide": {
+          "type": "router",
+          "script": "scripts/route_next_object.py",
+          "inputs": {
+            "found": {
+              "$ref": "perceive_item.found"
+            },
+            "cloud": {
+              "$ref": "perceive_item.cloud"
+            },
+            "container_obb": {
+              "$ref": "filter_obb_basket.obb"
+            }
+          }
+        },
+        "filter_obb_item": {
+          "type": "tool",
+          "tool": "geometry.filter_and_compute_obb",
+          "inputs": {
+            "points": {
+              "$ref": "perceive_item.cloud"
+            }
+          }
+        },
+        "found": {
+          "type": "noop"
+        },
+        "none": {
+          "type": "noop"
+        }
+      },
+      "edges": [
+        [
+          "START",
+          "observe"
+        ],
+        [
+          "observe",
+          "exterior_view"
+        ],
+        [
+          "exterior_view",
+          "perceive_basket"
+        ],
+        [
+          "perceive_basket",
+          "filter_obb_basket"
+        ],
+        [
+          "filter_obb_basket",
+          "perceive_item"
+        ],
+        [
+          "perceive_item",
+          "decide"
+        ],
+        [
+          "filter_obb_item",
+          "found"
+        ],
+        [
+          "found",
+          "END"
+        ],
+        [
+          "none",
+          "END"
+        ]
+      ],
+      "conditional_edges": {
+        "decide": {
+          "router_field": null,
+          "mapping": {
+            "found": "filter_obb_item",
+            "none": "none"
+          }
+        }
+      },
+      "exit": {
+        "router_field": null,
+        "success_values": [
+          "found",
+          "none"
+        ]
+      },
+      "on_error": "not_found"
+    },
+    "grasp_sg": {
+      "skill": "grasping-with-planner",
+      "inputs": {
+        "target_obb": "OrientedBoundingBox"
+      },
+      "outputs": {
+        "ee_pose_at_grasp": {
+          "$ref": "observe.arms.0.ee_pose"
+        }
+      },
+      "nodes": {
+        "open": {
+          "type": "tool",
+          "tool": "robot.open_gripper",
+          "inputs": {
+            "settle_steps": 40
+          }
+        },
+        "compute_grasp": {
+          "type": "tool",
+          "tool": "geometry.top_down_grasp_candidates",
+          "inputs": {
+            "obb": {
+              "$ref": "in.target_obb"
+            },
+            "z_offset": -0.03
+          }
+        },
+        "goto_grasp": {
+          "type": "script",
+          "script": "scripts/grasp_move.py",
+          "inputs": {
+            "grasp_pose": {
+              "$ref": "compute_grasp.candidates.poses.0"
+            },
+            "candidate_poses": {
+              "$ref": "compute_grasp.candidates.poses"
+            },
+            "target_obb": {
+              "$ref": "in.target_obb"
+            },
+            "hover_z": 0.2
+          }
+        },
+        "observe": {
+          "type": "tool",
+          "tool": "robot.get_observation"
+        },
+        "close": {
+          "type": "tool",
+          "tool": "robot.close_gripper",
+          "inputs": {
+            "settle_steps": 60
+          }
+        },
+        "grasped": {
+          "type": "noop"
+        }
+      },
+      "edges": [
+        [
+          "START",
+          "open"
+        ],
+        [
+          "open",
+          "compute_grasp"
+        ],
+        [
+          "compute_grasp",
+          "goto_grasp"
+        ],
+        [
+          "goto_grasp",
+          "observe"
+        ],
+        [
+          "observe",
+          "close"
+        ],
+        [
+          "close",
+          "grasped"
+        ],
+        [
+          "grasped",
+          "END"
+        ]
+      ],
+      "conditional_edges": {},
+      "exit": {
+        "router_field": null,
+        "success_values": [
+          "grasped"
+        ]
+      },
+      "on_error": "failed",
+      "stage": "grasp"
+    },
+    "transport_sg": {
+      "skill": "transporting-objects",
+      "inputs": {
+        "container_obb": "OrientedBoundingBox"
+      },
+      "outputs": {
+        "place_position": {
+          "$ref": "transport_move.place_position"
+        }
+      },
+      "nodes": {
+        "transport_move": {
+          "type": "script",
+          "script": "scripts/transport_move.py",
+          "inputs": {
+            "container_obb": {
+              "$ref": "in.container_obb"
+            },
+            "place_offset": -0.06
+          }
+        },
+        "release": {
+          "type": "script",
+          "script": "scripts/place_release.py",
+          "inputs": {
+            "place_position": {
+              "$ref": "transport_move.place_position"
+            }
+          }
+        },
+        "placed": {
+          "type": "noop"
+        }
+      },
+      "edges": [
+        [
+          "START",
+          "transport_move"
+        ],
+        [
+          "transport_move",
+          "release"
+        ],
+        [
+          "release",
+          "placed"
+        ],
+        [
+          "placed",
+          "END"
+        ]
+      ],
+      "conditional_edges": {},
+      "exit": {
+        "router_field": null,
+        "success_values": [
+          "placed"
+        ]
+      },
+      "on_error": "blocked",
+      "stage": "place"
+    }
+  }
+}

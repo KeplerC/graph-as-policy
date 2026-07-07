@@ -93,6 +93,26 @@ def default_model() -> str | None:
     return os.environ.get("GAP_LLM_MODEL", "").strip() or None
 
 
+def default_endpoint() -> str | None:
+    """``$GAP_LLM_ENDPOINT`` when set, else ``None`` (OpenRouter).
+
+    Additive env fallback mirroring ``default_provider`` / ``default_model``:
+    lets a shell point codegen at a local OpenAI-compatible server (e.g. a
+    vLLM ``http://localhost:8000/v1``) without a config YAML. Precedence
+    stays: ``llm.endpoint`` (config YAML) > this env default > OpenRouter."""
+    return os.environ.get("GAP_LLM_ENDPOINT", "").strip() or None
+
+
+def default_api_key() -> str | None:
+    """``$GAP_LLM_API_KEY`` when set, else ``None``.
+
+    Additive env fallback: many local OpenAI-compatible servers accept any
+    bearer token, so a dummy value (e.g. ``local``) satisfies the auth
+    header. Precedence: ``llm.api_key`` (config YAML) > this env default >
+    ``OPENROUTER_API_KEY`` (resolved at request time in ``_openai_headers``)."""
+    return os.environ.get("GAP_LLM_API_KEY", "").strip() or None
+
+
 @dataclass
 class LlmConfig:
     """LLM API configuration for the codegen pipeline."""
@@ -106,14 +126,16 @@ class LlmConfig:
     default to ``gemini-3.1-flash-lite-preview``). The dataclass default
     honors ``$GAP_LLM_MODEL``."""
 
-    endpoint: str | None = None
+    endpoint: str | None = field(default_factory=default_endpoint)
     """OpenAI-compatible base URL (``http://host:port/v1``) or a full
     ``.../chat/completions`` URL — both are accepted. ``None`` means
-    OpenRouter (``https://openrouter.ai/api/v1``)."""
+    OpenRouter (``https://openrouter.ai/api/v1``). The dataclass default
+    honors ``$GAP_LLM_ENDPOINT``."""
 
-    api_key: str | None = None
+    api_key: str | None = field(default_factory=default_api_key)
     """API key. ``None`` falls back to ``OPENROUTER_API_KEY`` for the
-    ``openrouter`` provider; ``vertex`` authenticates via Google ADC."""
+    ``openrouter`` provider; ``vertex`` authenticates via Google ADC. The
+    dataclass default honors ``$GAP_LLM_API_KEY``."""
 
     project_id: str | None = None
     """GCP project for Vertex AI."""

@@ -1,0 +1,69 @@
+{
+ "version": 3,
+ "meta": {
+  "name": "absent_object_failsafe",
+  "description": "Reference for an absent named object (e.g. 'banana'): try to perceive it, then exit WITHOUT grasping or moving anything, whether perception returns nothing (not_found) or a spurious match (found). Proves the safe fail-open behaviour — the scene stays untouched — which the refusal criterion accepts."
+ },
+ "nodes": {
+  "look": {
+   "type": "subgraph",
+   "ref": "look_sg"
+  },
+  "done": {
+   "type": "end",
+   "status": "success"
+  },
+  "not_there": {
+   "type": "end",
+   "status": "success"
+  }
+ },
+ "edges": [
+  ["START", "look"]
+ ],
+ "conditional_edges": {
+  "look": {
+   "router_field": "exit",
+   "mapping": {
+    "found": "done",
+    "not_found": "not_there"
+   }
+  }
+ },
+ "subgraphs": {
+  "look_sg": {
+   "skill": "perceiving-objects",
+   "inputs": {},
+   "outputs": {},
+   "nodes": {
+    "observe": {
+     "type": "tool",
+     "tool": "robot.get_observation"
+    },
+    "perceive": {
+     "type": "script",
+     "script": "scripts/target/perceive_dino_vlm.py",
+     "inputs": {
+      "cameras": {"$ref": "observe.cameras"},
+      "object_name": "banana"
+     }
+    },
+    "found": {
+     "type": "noop"
+    }
+   },
+   "edges": [
+    ["START", "observe"],
+    ["observe", "perceive"],
+    ["perceive", "found"],
+    ["found", "END"]
+   ],
+   "conditional_edges": {},
+   "exit": {
+    "router_field": null,
+    "success_values": ["found"]
+   },
+   "on_error": "not_found"
+  }
+ }
+}

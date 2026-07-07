@@ -145,6 +145,18 @@ def libero_pro_root() -> str | None:
     return _opt("GAP_LIBERO_PRO_ROOT")
 
 
+def extra_task_roots() -> list[str]:
+    """``GAP_EXTRA_TASK_ROOTS`` — colon-separated extra roots searched (before
+    the vab repo's ``tasks/``) for self-contained YAML task suites; each root
+    contains ``<suite_name>/*.yaml`` dirs. Lets examples/benchmarks ship their
+    own suites without touching the vendored fork. Suite names must start
+    with ``libero`` to route through the env registry's prefix entry."""
+    raw = _opt("GAP_EXTRA_TASK_ROOTS")
+    if not raw:
+        return []
+    return [p for p in (s.strip() for s in raw.split(":")) if p]
+
+
 def ur_urdf() -> str | None:
     """``GAP_UR_URDF`` — UR URDF used for FK in the UR+ZED connector."""
     return _opt("GAP_UR_URDF")

@@ -1,4 +1,4 @@
-"""Run one zero-shot prompt end-to-end: generate -> execute -> score.
+"""Run one benchmark case end-to-end: generate -> execute -> score.
 
     MUJOCO_GL=egl uv run python \
         examples/zero_shot_prompts/run_prompt.py \
@@ -8,16 +8,25 @@ Pipeline per case:
 
 1. ``gap.agent.generate_sync(prompt)`` — the prompt verbatim, once per
    case (cached in ``<case>/gen/task_00``; ``--force-generate`` refreshes).
-2. For each seed: a fresh sim connector, ``StateRecorder`` around the
-   tool dispatch, ``gap.execute(..., checkpoints="warn")``, video saved.
-3. ``criteria.evaluate_seed`` over the recorded state trace ->
-   ``seed<k>/result_seed.json``; the case aggregate (PASS only if every
-   seed passes) -> ``<case>/result.json``.
+2. For each seed: a fresh sim connector (with the case's
+   ``env_overrides`` exported first), ``StateRecorder`` (trace schema 2)
+   around the tool dispatch, ``gap.execute(..., checkpoints="warn")``,
+   video saved.
+3. ``zsp.evaluate.evaluate_seed`` over the recorded state trace ->
+   ``seed<k>/result_seed.json``; the case aggregate (all seeds must
+   pass, unless the case declares ``aggregate="any_seed"``) ->
+   ``<case>/result.json``.
 
-``--re-eval`` re-scores existing traces from disk without sim or LLM —
-this is also how a timed-out (hung) run gets its post-mortem verdict:
-``run_all.py`` kills the process group, drops ``timeout_marker.json``,
-and re-invokes this script with ``--re-eval``.
+Phases: ``--gen-only`` stops after generation (no sim, cheap to fan
+out); ``--exec-only`` requires the cached generation. ``--re-eval``
+re-scores existing traces from disk without sim or LLM — also how a
+timed-out (hung) run gets its post-mortem verdict via ``run_all.py``.
+``--graph DIR`` skips generation and executes a given workflow dir —
+the reward-oracle path: score ANY graph against a case's criterion.
+
+Refusal-aware cases (``success_source="gen"`` or a criterion using the
+``gen_refused`` leaf) route a generation refusal INTO criterion
+evaluation instead of short-circuiting to the GEN_REFUSED verdict.
 
 Exit codes: 0 pass, 1 fail, 2 infra crash, 3 generation error/refusal.
 """
@@ -32,21 +41,24 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from typing import Any
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
-from cases import CASES, Case  # noqa: E402
-import criteria  # noqa: E402
-from state_log import StateRecorder, load_jsonl  # noqa: E402
+from zsp import diagnostics  # noqa: E402
+from zsp.evaluate import evaluate_seed  # noqa: E402
+from zsp.registry import CASES  # noqa: E402
+from zsp.runner.gpu import pin_render_gpu, relocate_tmpdir  # noqa: E402
+from zsp.schema import Case  # noqa: E402
+from zsp.state_log import StateRecorder, load_jsonl  # noqa: E402
 
 logger = logging.getLogger("zero_shot_prompts")
 
 
 def _default_gcp_project() -> str | None:
     """Project for the vertex provider: the ADC quota project on this
-    machine (gap.agent.llm reads $GOOGLE_CLOUD_PROJECT; google-genai
-    otherwise needs an explicit project for vertexai=True)."""
+    machine (gap.agent.llm reads $GOOGLE_CLOUD_PROJECT)."""
     adc = Path.home() / ".config/gcloud/application_default_credentials.json"
     try:
         return json.loads(adc.read_text()).get("quota_project_id") or None
@@ -54,50 +66,49 @@ def _default_gcp_project() -> str | None:
         return None
 
 
-def _pick_freest_gpu() -> None:
-    """Pin this case to the GPU with the most free memory (shared box:
-    device 0 has been observed at 80/82 GB from other users' jobs, which
-    makes CuRobo's planner die with CUDA OOM mid-case). Respects an
-    explicit CUDA_VISIBLE_DEVICES; MUJOCO_EGL_DEVICE_ID is set to the
-    same physical index so EGL rendering follows."""
-    if os.environ.get("CUDA_VISIBLE_DEVICES"):
-        return
-    import subprocess
-    try:
-        rows = subprocess.run(
-            ["nvidia-smi", "--query-gpu=index,memory.free",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=10,
-        ).stdout.strip().splitlines()
-        idx, free = max(
-            (r.split(",") for r in rows), key=lambda r: int(r[1]))
-        os.environ["CUDA_VISIBLE_DEVICES"] = idx.strip()
-        os.environ.setdefault("MUJOCO_EGL_DEVICE_ID", idx.strip())
-        logger.info("pinned to GPU %s (%s MiB free)", idx.strip(),
-                    free.strip())
-    except Exception as exc:
-        logger.warning("GPU auto-pick failed (%s); using defaults", exc)
-
-
 def env_hygiene() -> None:
-    _pick_freest_gpu()
-    os.environ.setdefault("MUJOCO_GL", "egl")
-    # Keep frame buffers off /tmp (measured near-full); home volume instead.
-    tmp = Path.home() / ".cache" / "gap_zero_shot_prompts_tmp"
-    tmp.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("TMPDIR", str(tmp))
+    """Rendering/GPU pin (pre-set values win — run_all's round-robin
+    pinning relies on that), TMPDIR off /tmp, vertex project backfill,
+    and GAP_DECIDE_TRUST_ENV scrubbed (a generated decide-loop must not
+    trust the env's own reward — it measures a different task)."""
+    pin_render_gpu()
+    relocate_tmpdir()
     if not os.environ.get("GOOGLE_CLOUD_PROJECT"):
         proj = _default_gcp_project()
         if proj:
             os.environ["GOOGLE_CLOUD_PROJECT"] = proj
-    # perceiving-next-item's decide script treats the env's own
-    # check_success as authoritative ONLY when this opt-in is set; the
-    # env's task is not the prompt's task, so it must stay off here.
     os.environ.pop("GAP_DECIDE_TRUST_ENV", None)
+    # Make the example-local libero_zsp_* task suites discoverable by the
+    # loader (GAP_EXTRA_TASK_ROOTS is searched before the vab root). Needed
+    # whenever a case's sim_task is an authored zsp scene; prepended so a
+    # pre-set value still wins.
+    tasks_dir = str(_HERE / "tasks")
+    existing = os.environ.get("GAP_EXTRA_TASK_ROOTS", "")
+    parts = [p for p in existing.split(":") if p]
+    if tasks_dir not in parts:
+        os.environ["GAP_EXTRA_TASK_ROOTS"] = ":".join([*parts, tasks_dir])
+
+
+def apply_env_overrides(case: Case) -> dict[str, str]:
+    """Export the case's env overrides (e.g. GAP_LIBERO_PERTURBED).
+
+    Each case runs in its own subprocess, so nothing to restore."""
+    applied = dict(case.env_overrides or {})
+    for k, v in applied.items():
+        os.environ[k] = str(v)
+    return applied
 
 
 DEFAULT_PROVIDER = os.environ.get("GAP_LLM_PROVIDER", "vertex")
 DEFAULT_MODEL = os.environ.get("GAP_LLM_MODEL", "gemini-3.1-pro-preview")
+
+
+def case_accepts_refusal(case: Case) -> bool:
+    """Does this case's criterion score a refusal instead of erroring?"""
+    if case.success_source == "gen":
+        return True
+    return any("gen_refused" in json.dumps(c.get("expr", {}))
+               for c in case.criterion.get("checks", []))
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +154,17 @@ def _load_workflow(wf_dir: Path | None) -> dict | None:
         return None
 
 
+def _gen_extras(gen_info: dict) -> dict[str, Any]:
+    if gen_info.get("refused"):
+        outcome = "REFUSED"
+    elif gen_info.get("error"):
+        outcome = "ERROR"
+    else:
+        outcome = "OK"
+    return {"gen_outcome": outcome,
+            "gen_message": str(gen_info.get("error") or "")[:500]}
+
+
 # ---------------------------------------------------------------------------
 # Execution (one seed)
 # ---------------------------------------------------------------------------
@@ -163,8 +185,7 @@ def run_seed(case: Case, wf_dir: Path, seed_dir: Path, seed: int,
     # $TMPDIR/.gap_next_item_progress_<sha1(trace_dir)> (see
     # open-robot-skills perceiving-next-item/scripts/decide_next_item.py).
     # Our TMPDIR persists and trace paths repeat across re-runs of the
-    # same --out, so a previous run's counter would leak into this one's
-    # first pass — clear the scratch before every fresh episode.
+    # same --out, so clear the scratch before every fresh episode.
     import glob
     import tempfile
     for stale in glob.glob(os.path.join(
@@ -176,11 +197,14 @@ def run_seed(case: Case, wf_dir: Path, seed_dir: Path, seed: int,
     execution: dict = {
         "seed": seed, "ran": False, "success": False, "exit_status": None,
         "error": None, "duration_s": 0.0, "harness_crash": None,
+        "env_overrides": dict(case.env_overrides or {}),
     }
     conn = gap.connector.sim(
         "libero", task=case.sim_task, record_video=video, seed=seed,
     )
-    rec = StateRecorder(conn, seed_dir)
+    rec = StateRecorder(conn, seed_dir, meta={
+        "case": case.id, "sim_task": case.sim_task, "seed": seed,
+    })
     try:
         conn.reset()
         rec.install()
@@ -204,8 +228,10 @@ def run_seed(case: Case, wf_dir: Path, seed_dir: Path, seed: int,
         rec.snapshot("__final__")
         try:
             done, reward = conn.check_success()
-            execution["env_task_completed"] = bool(done)   # advisory only:
-            execution["env_reward"] = float(reward)         # env's own task
+            # Primary signal only for success_source env/both (native-
+            # language classic cases); advisory metadata otherwise.
+            execution["env_task_completed"] = bool(done)
+            execution["env_reward"] = float(reward)
         except Exception:
             pass
         if video:
@@ -241,15 +267,26 @@ def evaluate_from_disk(case: Case, case_dir: Path,
                        timed_out_case: bool) -> dict:
     """Score every seed dir on disk; aggregate to the case verdict."""
     wf_dir = case_dir / "gen" / "task_00"
+    gen_path = case_dir / "generation.json"
+    gen_info: dict = {}
+    try:
+        gen_info = json.loads(gen_path.read_text())
+    except Exception:
+        pass
     if not wf_dir.exists():
-        gen_path = case_dir / "generation.json"
-        try:
-            override = json.loads(gen_path.read_text()).get("graph_override")
-            wf_dir = Path(override) if override else wf_dir
-        except Exception:
-            pass
+        override = gen_info.get("graph_override")
+        wf_dir = Path(override) if override else wf_dir
     workflow = _load_workflow(wf_dir if wf_dir.exists() else None)
-    structure = criteria.workflow_structure(workflow)
+    structure = diagnostics.workflow_structure(workflow)
+
+    if case.success_source == "gen":
+        ev = evaluate_seed(case, [], [], {}, extras={
+            **_gen_extras(gen_info),
+            "generated_graph_structure": structure,
+        })
+        return _aggregate(case, case_dir,
+                          [{"seed": None, "evaluation": ev.to_dict()}],
+                          structure)
 
     seed_payloads = []
     for seed in case.seeds:
@@ -279,10 +316,11 @@ def evaluate_from_disk(case: Case, case_dir: Path,
         extras = {
             "generated_graph_structure": structure,
             "max_node_iterations":
-                criteria.max_node_iterations(seed_dir / "trace"),
+                diagnostics.max_node_iterations(seed_dir / "trace"),
+            "trace_dir": str(seed_dir / "trace"),
+            **_gen_extras(gen_info),
         }
-        ev = criteria.evaluate_seed(case, states, events, execution,
-                                    extras)
+        ev = evaluate_seed(case, states, events, execution, extras)
         payload = {"seed": seed, "execution": execution,
                    "evaluation": ev.to_dict()}
         (seed_dir / "result_seed.json").write_text(
@@ -293,11 +331,28 @@ def evaluate_from_disk(case: Case, case_dir: Path,
     return _aggregate(case, case_dir, seed_payloads, structure)
 
 
+def _case_meta(case: Case) -> dict[str, Any]:
+    return {
+        "id": case.id, "prompt": case.prompt, "category": case.category,
+        "tier": case.tier, "tags": list(case.tags),
+        "template": case.template, "baseline": case.baseline,
+        "intent": case.intent, "criterion": case.criterion,
+        "seeds": list(case.seeds), "sim_task": case.sim_task,
+        "success_source": case.success_source,
+        "aggregate": case.aggregate,
+        "env_overrides": dict(case.env_overrides or {}),
+    }
+
+
 def _aggregate(case: Case, case_dir: Path, seed_payloads: list[dict],
                structure: dict) -> dict:
     verdicts = [p["evaluation"]["verdict"] for p in seed_payloads]
     scores = [float(p["evaluation"]["score"]) for p in seed_payloads]
-    if all(v == "PASS" for v in verdicts) and verdicts:
+    if case.aggregate == "any_seed":
+        passed = any(v == "PASS" for v in verdicts)
+    else:
+        passed = bool(verdicts) and all(v == "PASS" for v in verdicts)
+    if passed:
         verdict = "PASS"
     elif "TIMEOUT" in verdicts:
         verdict = "TIMEOUT"
@@ -307,11 +362,7 @@ def _aggregate(case: Case, case_dir: Path, seed_payloads: list[dict],
     generation = (json.loads(gen_path.read_text())
                   if gen_path.exists() else {})
     payload = {
-        "case": {
-            "id": case.id, "prompt": case.prompt,
-            "baseline": case.baseline, "criterion": case.criterion,
-            "seeds": list(case.seeds), "sim_task": case.sim_task,
-        },
+        "case": _case_meta(case),
         "generation": generation,
         "generated_graph_structure": structure,
         "verdict": verdict,
@@ -338,31 +389,61 @@ def _aggregate(case: Case, case_dir: Path, seed_payloads: list[dict],
 
 def run_case(case: Case, out_root: Path, *, provider: str, model: str,
              video: bool, force_generate: bool,
-             graph_override: Path | None, only_seed: int | None) -> dict:
+             graph_override: Path | None, only_seed: int | None,
+             gen_only: bool = False, exec_only: bool = False) -> dict:
     case_dir = out_root / case.id
     case_dir.mkdir(parents=True, exist_ok=True)
 
     if graph_override is not None:
         wf_dir: Path | None = graph_override
         gen_info = {"graph_override": str(graph_override), "refused": False}
+    elif exec_only:
+        wf_dir = case_dir / "gen" / "task_00"
+        gen_path = case_dir / "generation.json"
+        gen_info = (json.loads(gen_path.read_text())
+                    if gen_path.exists() else {"cached": True})
+        if not (wf_dir / "workflow.json").exists() and not case_accepts_refusal(case):
+            print(f"CASE {case.id}: no cached generation for --exec-only")
+            return {"verdict": "GEN_ERROR"}
+        if not (wf_dir / "workflow.json").exists():
+            wf_dir = None
     else:
         wf_dir, gen_info = generate(case, case_dir, provider, model,
                                     force_generate)
     (case_dir / "generation.json").write_text(
         json.dumps(gen_info, indent=2) + "\n")
 
+    if gen_only:
+        outcome = _gen_extras(gen_info)["gen_outcome"]
+        print(f"CASE {case.id}: GEN_{outcome}"
+              + (" (cached)" if gen_info.get("cached") else ""))
+        return {"verdict": "PASS" if outcome == "OK" else f"GEN_{outcome}"}
+
+    if case.success_source == "gen":
+        return evaluate_from_disk(case, case_dir, timed_out_case=False)
+
     if wf_dir is None:
+        if case_accepts_refusal(case):
+            # The criterion itself scores the refusal (e.g. absent-object
+            # probes where refusing is the CORRECT outcome).
+            structure = diagnostics.workflow_structure(None)
+            ev = evaluate_seed(case, [], [], {}, extras={
+                **_gen_extras(gen_info),
+                "generated_graph_structure": structure,
+            })
+            return _aggregate(case, case_dir,
+                              [{"seed": None, "evaluation": ev.to_dict()}],
+                              structure)
         verdict = "GEN_REFUSED" if gen_info.get("refused") else "GEN_ERROR"
         payload = {
-            "case": {"id": case.id, "prompt": case.prompt,
-                     "baseline": case.baseline},
+            "case": _case_meta(case),
             "generation": gen_info,
             "verdict": verdict, "score": 0.0, "seeds": [],
             "finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         (case_dir / "result.json").write_text(
             json.dumps(payload, indent=2, default=str) + "\n")
-        print(f"CASE {case.id}: {verdict} — {gen_info.get('error', '')[:200]}")
+        print(f"CASE {case.id}: {verdict} — {str(gen_info.get('error', ''))[:200]}")
         return payload
 
     seeds = [only_seed] if only_seed is not None else list(case.seeds)
@@ -381,8 +462,13 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=None,
                     help="run only this seed (default: the case's list)")
     ap.add_argument("--graph", default=None,
-                    help="skip generation; execute this workflow dir")
+                    help="skip generation; execute this workflow dir "
+                         "(the reward-oracle path)")
     ap.add_argument("--force-generate", action="store_true")
+    ap.add_argument("--gen-only", action="store_true",
+                    help="stop after generation (no sim)")
+    ap.add_argument("--exec-only", action="store_true",
+                    help="require the cached generation; never call the LLM")
     ap.add_argument("--no-video", action="store_true")
     ap.add_argument("--re-eval", action="store_true",
                     help="re-score existing traces (no sim, no LLM); "
@@ -396,12 +482,12 @@ def main() -> int:
     )
     env_hygiene()
     # Out-of-process tool bundles (perception VLM, ...) resolve their
-    # provider from the environment (GAP_VLM_PROVIDER > GAP_LLM_PROVIDER
-    # > "openrouter" — open-robot-skills/tools/vlm/tools.py); export the
-    # chosen provider/model so the runtime bundles match generation.
+    # provider from the environment; export the chosen provider/model so
+    # the runtime bundles match generation.
     os.environ["GAP_LLM_PROVIDER"] = args.provider
     os.environ["GAP_LLM_MODEL"] = args.model
     case = CASES[args.case]
+    apply_env_overrides(case)
     out_root = Path(args.out)
     case_dir = out_root / case.id
 
@@ -415,8 +501,7 @@ def main() -> int:
             verdict = ("GEN_REFUSED" if gen_info.get("refused")
                        else "TIMEOUT" if timed_out else "GEN_ERROR")
             payload = {
-                "case": {"id": case.id, "prompt": case.prompt,
-                         "baseline": case.baseline},
+                "case": _case_meta(case),
                 "generation": gen_info, "verdict": verdict,
                 "score": 0.0, "seeds": [],
             }
@@ -428,7 +513,8 @@ def main() -> int:
             case, out_root, provider=args.provider, model=args.model,
             video=not args.no_video, force_generate=args.force_generate,
             graph_override=Path(args.graph) if args.graph else None,
-            only_seed=args.seed,
+            only_seed=args.seed, gen_only=args.gen_only,
+            exec_only=args.exec_only,
         )
 
     verdict = payload.get("verdict")

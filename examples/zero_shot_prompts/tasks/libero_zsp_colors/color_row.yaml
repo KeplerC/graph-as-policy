@@ -1,0 +1,44 @@
+id: libero_zsp_colors.color_row
+language: Pick up the green ketchup bottle and place it in the basket
+arena: {name: floor}
+robot: {name: panda, controller: OSC_POSE}
+cameras: [agentview, robot0_eye_in_hand]
+camera_height: 128
+camera_width: 128
+camera_depth: false
+objects:
+- {id: ketchup, asset: ketchup}
+- {id: green_ketchup, asset: green_ketchup}
+- {id: blue_ketchup, asset: blue_ketchup}
+- {id: alphabet_soup, asset: alphabet_soup}
+- {id: red_alphabet_soup, asset: red_alphabet_soup}
+- {id: basket, asset: basket}
+- {id: red_basket, asset: red_basket}
+inits:
+- ketchup: [-0.06, -0.12, 0.072405, 0.5, 0.5, 0.5, 0.5]
+  green_ketchup: [-0.06, -0, 0.072405, 0.5, 0.5, 0.5, 0.5]
+  blue_ketchup: [-0.06, 0.12, 0.072405, 0.5, 0.5, 0.5, 0.5]
+  alphabet_soup: [0.083166, 0.18329, 0.038393, 0.48754, 0.512989, 0.515213, 0.483428]
+  red_alphabet_soup: [0.076324, 0.272102, 0.038393, -0.47245, 0.526919, 0.522997, -0.474995]
+  basket: [0.14, -0.200013, -0.004582, -0.001694, 0.001694, 0.707105, 0.707105]
+  red_basket: [-0.19, -0.220013, -0.004582, -0.001694, 0.001694, 0.707105, 0.707105]
+- ketchup: [-0.06, 0.12, 0.072405, 0.5, 0.5, 0.5, 0.5]
+  green_ketchup: [-0.06, -0.12, 0.072405, 0.5, 0.5, 0.5, 0.5]
+  blue_ketchup: [-0.06, -0, 0.072405, 0.5, 0.5, 0.5, 0.5]
+  alphabet_soup: [0.076378, 0.272571, 0.038393, -0.456688, 0.540638, 0.536793, -0.459348]
+  red_alphabet_soup: [0.083165, 0.183103, 0.038393, 0.471806, 0.527496, 0.529595, 0.467628]
+  basket: [-0.19, -0.220013, -0.004582, -0.001694, 0.001694, 0.707105, 0.707105]
+  red_basket: [0.14, -0.200013, -0.004582, -0.001694, 0.001694, 0.707105, 0.707105]
+- ketchup: [-0.06, -0, 0.072405, 0.5, 0.5, 0.5, 0.5]
+  green_ketchup: [-0.06, 0.12, 0.072405, 0.5, 0.5, 0.5, 0.5]
+  blue_ketchup: [-0.06, -0.12, 0.072405, 0.5, 0.5, 0.5, 0.5]
+  alphabet_soup: [0.076378, 0.272571, 0.038393, -0.456688, 0.540638, 0.536793, -0.459348]
+  red_alphabet_soup: [0.083165, 0.183103, 0.038393, 0.471806, 0.527496, 0.529595, 0.467628]
+  basket: [0.14, -0.200013, -0.004582, -0.001694, 0.001694, 0.707105, 0.707105]
+  red_basket: [-0.19, -0.220013, -0.004582, -0.001694, 0.001694, 0.707105, 0.707105]
+default_init_index: 0
+success:
+  predicate: contained_in
+  args: {"obj": "green_ketchup", "container": "basket", "xy_tol": 0.1, "z_low": -0.05, "z_high": 0.25}
+horizon: 500
+metadata: {"suite": "libero_zsp_colors", "source": "authored_zsp", "n_inits": 3}

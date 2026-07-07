@@ -286,9 +286,19 @@ def _get_vab_raw_env_cls() -> type:
 
 
 def _vab_suite_dir(suite_name: str) -> Path | None:
-    """Return the vab task dir for ``suite_name`` if it exists."""
-    suite_dir = _VAB_ROOT / "tasks" / suite_name
-    return suite_dir if suite_dir.is_dir() else None
+    """Return the YAML task dir for ``suite_name`` if one exists.
+
+    Searches any ``GAP_EXTRA_TASK_ROOTS`` entries (colon-separated; each a
+    dir of ``<suite_name>/`` suite dirs) before the vab repo's ``tasks/``,
+    so example-local suites can extend — or shadow — the vendored set.
+    """
+    roots = [Path(r) for r in env_config.extra_task_roots()]
+    roots.append(_VAB_ROOT / "tasks")
+    for root in roots:
+        suite_dir = root / suite_name
+        if suite_dir.is_dir():
+            return suite_dir
+    return None
 
 
 #: Classic LIBERO task numbering for the ``libero_object``-derived vab

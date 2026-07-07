@@ -1,0 +1,36 @@
+id: libero_zsp_stack.flat_boxes
+language: "Stack the chocolate pudding on the cream cheese"
+arena: {name: floor}
+robot: {name: panda, controller: OSC_POSE}
+cameras: [agentview, robot0_eye_in_hand]
+camera_height: 128
+camera_width: 128
+camera_depth: false
+objects:
+- {id: butter, asset: butter}
+- {id: cream_cheese, asset: cream_cheese}
+- {id: chocolate_pudding, asset: chocolate_pudding}
+- {id: plate, asset: plate}
+- {id: basket, asset: basket}
+inits:
+- butter: [-0.049999, 0.000002, 0.026555, 0.000000, 0.000000, 1.000000, -0.000030]
+  cream_cheese: [-0.050000, 0.000000, 0.008909, 0.000000, 0.000000, 1.000000, 0.000000]
+  chocolate_pudding: [-0.160000, -0.150000, 0.013065, -0.000000, 0.000000, 1.000000, 0.000000]
+  plate: [0.099999, 0.149997, 0.002506, -0.000005, 0.000014, -0.000000, 1.000000]
+  basket: [0.130000, -0.180013, -0.004582, -0.001694, 0.001694, 0.707105, 0.707105]
+- butter: [-0.079999, -0.099998, 0.026555, 0.000000, 0.000000, 1.000000, -0.000030]
+  cream_cheese: [-0.080000, -0.100000, 0.008909, 0.000000, 0.000000, 1.000000, 0.000000]
+  chocolate_pudding: [-0.160000, 0.120000, 0.013065, 0.000000, 0.000000, 1.000000, -0.000000]
+  plate: [0.099999, 0.179997, 0.002506, -0.000005, 0.000014, -0.000000, 1.000000]
+  basket: [0.130000, -0.200013, -0.004582, -0.001694, 0.001694, 0.707105, 0.707105]
+- butter: [-0.019999, 0.120002, 0.026555, 0.000000, 0.000000, 1.000000, -0.000031]
+  cream_cheese: [-0.020000, 0.120000, 0.008909, 0.000000, 0.000000, 1.000000, 0.000000]
+  chocolate_pudding: [-0.180000, -0.050000, 0.013065, -0.000000, 0.000000, 1.000000, -0.000000]
+  plate: [0.099999, -0.160003, 0.002506, -0.000005, 0.000014, -0.000000, 1.000000]
+  basket: [0.130000, 0.199987, -0.004582, -0.001694, 0.001694, 0.707105, 0.707105]
+default_init_index: 0
+success:
+  predicate: on_top_of
+  args: {"obj": "butter", "surface": "cream_cheese", "xy_tol": 0.15, "z_min": 0.005, "z_max": 0.2}
+horizon: 500
+metadata: {"suite": "libero_zsp_stack", "source": "authored_zsp", "n_inits": 3}

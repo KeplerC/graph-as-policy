@@ -1,0 +1,36 @@
+id: libero_zsp_prepacked.prepacked_basket
+language: Take everything out of the basket and place it on the table
+arena: {name: floor}
+robot: {name: panda, controller: OSC_POSE}
+cameras: [agentview, robot0_eye_in_hand]
+camera_height: 128
+camera_width: 128
+camera_depth: false
+objects:
+- {id: basket, asset: basket}
+- {id: alphabet_soup, asset: alphabet_soup}
+- {id: butter, asset: butter}
+- {id: milk, asset: milk}
+- {id: cream_cheese, asset: cream_cheese}
+inits:
+- basket: [0.100132, -0.001844, -0.004586, -0.001694, 0.001693, 0.707208, 0.707002]
+  alphabet_soup: [0.099562, -0.010837, 0.055392, 0.014287, 0.707312, 0.706693, 0.00958]
+  butter: [0.100343, 0.042336, 0.025692, -0, -3e-06, 0.999999, -0.00135]
+  milk: [-0.16, -0.15, 0.069735, 0.5, 0.5, 0.5, 0.5]
+  cream_cheese: [-0.16, 0.15, 0.008921, 0, 0, 1, 0]
+- basket: [0.060132, -0.181844, -0.004586, -0.001694, 0.001693, 0.707208, 0.707002]
+  alphabet_soup: [0.059562, -0.190837, 0.055392, 0.014287, 0.707312, 0.706693, 0.00958]
+  butter: [0.060343, -0.137664, 0.025692, -0, -3e-06, 0.999999, -0.00135]
+  milk: [-0.14, 0.16, 0.069735, 0.5, 0.5, 0.5, 0.5]
+  cream_cheese: [-0.16, -0.1, 0.008921, 0, 0, 1, 0]
+- basket: [0.060132, 0.178156, -0.004586, -0.001694, 0.001693, 0.707208, 0.707002]
+  alphabet_soup: [0.059562, 0.169163, 0.055392, 0.014287, 0.707312, 0.706693, 0.00958]
+  butter: [0.060343, 0.222336, 0.025692, -0, -3e-06, 0.999999, -0.00135]
+  milk: [-0.18, 0.02, 0.069735, 0.5, 0.5, 0.5, 0.5]
+  cream_cheese: [-0.08, -0.18, 0.008921, 0, 0, 1, 0]
+default_init_index: 0
+success:
+  predicate: contained_in
+  args: {"obj": "alphabet_soup", "container": "basket", "xy_tol": 0.1, "z_low": -0.05, "z_high": 0.25}
+horizon: 500
+metadata: {"suite": "libero_zsp_prepacked", "source": "authored_zsp", "n_inits": 3}

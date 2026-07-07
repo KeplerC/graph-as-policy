@@ -1,0 +1,36 @@
+id: libero_zsp_sizes.size_pairs
+language: Pick up the larger of the two soup cans and place it in the basket
+arena: {name: floor}
+robot: {name: panda, controller: OSC_POSE}
+cameras: [agentview, robot0_eye_in_hand]
+camera_height: 128
+camera_width: 128
+camera_depth: false
+objects:
+- {id: alphabet_soup, asset: alphabet_soup}
+- {id: bigger_alphabet_soup, asset: bigger_alphabet_soup}
+- {id: milk, asset: milk}
+- {id: bigger_milk, asset: bigger_milk}
+- {id: basket, asset: basket}
+inits:
+- alphabet_soup: [-0.100004, -0.149999, 0.038393, 0.002258, 0.707706, 0.7065, -0.002258]
+  bigger_alphabet_soup: [-0.010007, -0.149999, 0.057593, 0.002252, 0.707705, 0.706501, -0.002252]
+  milk: [-0.1, 0.15, 0.069735, 0.5, 0.5, 0.5, 0.5]
+  bigger_milk: [-0.01, 0.150002, 0.124485, 0.5, 0.5, 0.5, 0.5]
+  basket: [0.14, -1.3e-05, -0.004582, -0.001694, 0.001694, 0.707105, 0.707105]
+- alphabet_soup: [-0.010004, 0.150001, 0.038393, 0.002258, 0.707706, 0.7065, -0.002258]
+  bigger_alphabet_soup: [-0.100007, 0.150001, 0.057593, 0.002252, 0.707705, 0.706501, -0.002252]
+  milk: [-0.01, -0.15, 0.069735, 0.5, 0.5, 0.5, 0.5]
+  bigger_milk: [-0.1, -0.149998, 0.124485, 0.5, 0.5, 0.5, 0.5]
+  basket: [0.14, -1.3e-05, -0.004582, -0.001694, 0.001694, 0.707105, 0.707105]
+- alphabet_soup: [-0.100004, 0.150001, 0.038393, 0.002258, 0.707706, 0.7065, -0.002258]
+  bigger_alphabet_soup: [-0.010007, 0.150001, 0.057593, 0.002252, 0.707705, 0.706501, -0.002252]
+  milk: [-0.01, -0.15, 0.069735, 0.5, 0.5, 0.5, 0.5]
+  bigger_milk: [-0.1, -0.149998, 0.124485, 0.5, 0.5, 0.5, 0.5]
+  basket: [0.1, -0.220013, -0.004582, -0.001694, 0.001694, 0.707105, 0.707105]
+default_init_index: 0
+success:
+  predicate: contained_in
+  args: {"obj": "bigger_alphabet_soup", "container": "basket", "xy_tol": 0.1, "z_low": -0.05, "z_high": 0.25}
+horizon: 500
+metadata: {"suite": "libero_zsp_sizes", "source": "authored_zsp", "n_inits": 3}

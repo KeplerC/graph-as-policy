@@ -1,0 +1,64 @@
+{
+ "version": 3,
+ "meta": {
+  "name": "vqa_count_objects",
+  "description": "Reference for the counting VQA case: observe the table, ask the VLM how many grocery items are present (excluding the basket), and report the number. No manipulation. Proves the perceive->report plumbing and that the reported-number criterion accepts a produced answer."
+ },
+ "nodes": {
+  "count": {
+   "type": "subgraph",
+   "ref": "count_sg"
+  },
+  "done": {
+   "type": "end",
+   "status": "success"
+  }
+ },
+ "edges": [
+  ["START", "count"]
+ ],
+ "conditional_edges": {
+  "count": {
+   "router_field": "exit",
+   "mapping": {
+    "reported": "done",
+    "failed": "done"
+   }
+  }
+ },
+ "subgraphs": {
+  "count_sg": {
+   "skill": "perceiving-objects",
+   "inputs": {},
+   "outputs": {},
+   "nodes": {
+    "observe": {
+     "type": "tool",
+     "tool": "robot.get_observation"
+    },
+    "count": {
+     "type": "script",
+     "script": "scripts/count.py",
+     "inputs": {
+      "cameras": {"$ref": "observe.cameras"}
+     }
+    },
+    "reported": {
+     "type": "noop"
+    }
+   },
+   "edges": [
+    ["START", "observe"],
+    ["observe", "count"],
+    ["count", "reported"],
+    ["reported", "END"]
+   ],
+   "conditional_edges": {},
+   "exit": {
+    "router_field": null,
+    "success_values": ["reported"]
+   },
+   "on_error": "failed"
+  }
+ }
+}

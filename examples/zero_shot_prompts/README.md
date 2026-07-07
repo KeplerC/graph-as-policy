@@ -1,151 +1,240 @@
-# zero_shot_prompts — the grocery_fulfillment zero-shot prompt matrix
+# zero_shot_prompts — the GaP zero-shot instruction benchmark
 
-> **What:** the six zero-shot tester prompts, fed verbatim to
-> `gap.agent.generate`, each judged by a programmatic **object-state
-> criterion** over simulator ground truth · **Needs:** `grocery` (CUDA)
-> + LLM credential (generation and the perception VLM) · **Time:**
-> ~10–30 min/case (one generation + 1–3 executions).
+> **What:** 97 natural-language prompts fed VERBATIM to
+> `gap.agent.generate` (no scene hints, no curated descriptors), spanning
+> grounding, spatial/movement, temporal, quantity, coding/control-flow,
+> report/VQA, robustness, refusal, and classic-LIBERO generalization —
+> each judged by a **declarative, programmatic criterion** over simulator
+> ground truth · **Needs:** `grocery` (CUDA) + an LLM credential
+> (generation and the perception VLM) · **Time:** report-only cases
+> ~3 min, single pick-place ~5-15 min, packing up to ~25 min/seed;
+> full matrix ≈ 17-19 h serial, ≈ 4-5 h at `--jobs 6`.
 
-The prompts and their **baseline** column come from a manual test pass
-(observed outcomes and suspected causes, quoted in `cases.py`). This
-suite replaces eyeballed verdicts with measured ones: it records the
-ground-truth world state around **every tool call** during execution and
-scores each prompt on what physically happened — which objects were
-actually grasped and lifted, what ended up inside the basket, how far
-and in which direction things moved, whether the can is still upright —
-never on the model's own success claims and never on the env's built-in
-reward (that measures a different task; it is recorded as advisory
-metadata only).
+The suite grew out of a six-prompt manual test pass (those originals are
+preserved verbatim as the T0 regression tier, tester baselines quoted in
+`zsp/cases/classic0.py`) into a systematic capability benchmark. It never
+trusts the model's own success claims, and the env's built-in reward is
+advisory **except** where the prompt IS the env task's native language
+(then the BDDL predicate is the task's own oracle — `success_source`).
 
-## The matrix
+## The corpus (97 cases: 13 T0 regression, 64 T1 core, 20 T2 frontier)
 
-| case | prompt | tester baseline | measured criterion (abridged) |
-|---|---|---|---|
-| `soup_basket` | "Pick up the alphabet soup can and place it in the basket" | Success, robust to position variations | per seed: soup **grasped-and-lifted** ∧ finishes settled in the basket ∧ nothing else packed; runs on **3 seeds** (layouts genuinely differ) and passes only if all pass |
-| `all_objects` | "Pick up all objects and place them in the basket" | Failure: only the soup; blamed on "GaP is DAG-only, task needs cycles" | 6/6 settled in basket (score = fraction); per-object grasp events; **diagnostics: does the generated graph contain cycles + did the executor actually revisit nodes at runtime** |
-| `soup_then_milk` | "…soup in the basket, then …milk in the basket" | Failure: hangs at milk grasp (mesh loading suspected) | two distinct grasp events ∧ both packed ∧ soup enters basket strictly first; a wall-clock **hang is a first-class outcome** — the killed run is scored from its flushed partial trace and the last in-flight tool call is reported as the hang site |
-| `two_inches_right` | "…place it down two inches to the right" | Failure: picks up, then knocks it down | grasped ∧ final Δy = 5.1 ± 3 cm (either y direction: **+y is image-right in the agentview video — measured from the camera frame**; −y is the robot's right; direction logged) ∧ Δx ≤ 5 cm ∧ **still upright** (initially-up body axis ≤ 30° from vertical; knocked-over ≈ 90°) ∧ released on the table |
-| `cream_cheese` | "Pick up the cream cheese and put it in the basket" | Failure: CuRobo can't find a collision-free plan; oversized bounding box from `geometry.top_down_grasp_candidates` | grasped-and-lifted ∧ settled in basket ∧ nothing else packed; **diagnostics: planner tool errors + every `geometry.*` numeric output** for comparison against the ground-truth extents (measured: 8.3 × 4.3 × 2.0 cm — it really is a low object) |
-| `move_basket_ranch` | "Move the basket to the opposite side, then pick up the ranch and place it in the basket" | (no outcome recorded) | basket displaced ≥ 20 cm with a lateral side-flip (or ≥ 30 cm in x) ∧ ranch (`salad_dressing`) grasped ∧ settled inside the **relocated** basket (containment follows the basket's live pose); runs on seed 1 where the basket starts clearly on one side |
+| category | n | what it probes |
+|---|---|---|
+| grounding | 22 | referents, color/size variants, categories, negation, constraints, prompt noise (politeness/typos/中文), world knowledge, ambiguity, native-language pick sweep |
+| spatial | 21 | metric offsets, midpoints, relations (left-of/in-front, permuted pairs), stacking (incl. 3-tower), un-stacking, motion-only EE goals, pushing†, reorientation† |
+| temporal | 6 | strict ordering (2- and 3-step, permuted roles, alphabetical†), put-back memory, swap† |
+| quantity | 1 | exact cardinality with free identity choice |
+| coding | 13 | computed referents (closest/farthest/tallest/middle), conditionals, retry budgets, verify loops, two-container sorting, proximity assignment†, basket un-packing†, look-inside branching† |
+| report | 5 | VQA over ground truth: counting, closest-name, metric estimates, in-container counting, size comparison |
+| robustness | 5 | position-variance / permutation / basket-swap suites, native packing, moving basket† |
+| articulated† | 4 | drawer pull, stove knob, drawer+place, microwave door (classic scenes, joint-qpos scored) |
+| classic | 6 | native-language generalization: classic object/spatial/goal/10 suites, object-part targets, dual moka pots |
+| refusal | 7 | absent objects/attributes/containers, infeasible & unsafe asks, do-nothing calibration, instruction retraction |
 
-### Extended matrix (new capability probes + more VAB tasks/suites)
+† = T2 frontier: expected-hard probes of composition beyond current
+skills (no push/articulation/reorientation skill exists). Failing is
+informative; the criteria are correct so future successes are recognized
+and partial progress (joint excursion, tilt, displacement) is measured.
 
-Seven further cases probe axes the tester matrix didn't — all within
-the Variational-Automation-Benchmark's own grocery task families
-(`third_party/Variational-Automation-Benchmark/tasks/`), whose
-vocabulary spans 10 items (alphabet_soup, bbq_sauce, butter,
-chocolate_pudding, cream_cheese, ketchup, milk, orange_juice,
-salad_dressing, tomato_sauce): each variance task carries a different
-6-item subset + basket, and the basket-swap suite relocates the basket
-across inits. Every scene below was probed live before its criterion
-was written:
+**Permutation sweeps:** `pick_native__<obj>` stamps one template over
+the eight remaining `libero_object_all_variance` tasks (native language
+verbatim, distinct 6-item distractor scene each — with the T0 cases the
+full 10-object vocabulary is covered); the report rolls sweeps up with a
+per-object breakdown. Scene inits in the authored `libero_zsp_*` suites
+permute object IDENTITIES across seeds (row order, pair sides,
+container assignment), so seed-0 memorization fails elsewhere.
 
-| case | VAB task | prompt | probes | criterion (abridged) |
-|---|---|---|---|---|
-| `stack_butter_on_cream_cheese` | all_variance/0 | "Stack the butter on top of the cream cheese" | precision placement | butter resting ON the cream cheese (`is_on_strict`-style window, centroid inside base), base not dragged |
-| `all_except_milk` | all_variance/0 | "Put all the objects except the milk into the basket" | negation | the 5 non-milk objects in the basket ∧ **milk stays out** |
-| `soup_left_of_milk` | all_variance/0 | "Place the alphabet soup to the left of the milk" | spatial relation | soup settled 6–30 cm from the milk along y (either reading of "left"; side logged), ≤ 15 cm in x, on the table |
-| `both_boxes` | all_variance/0 | "Put both boxes in the basket" | category grounding | exactly the two box-shaped items (butter, cream_cheese) in the basket; cans/bottles/cartons stay out |
-| `pudding_basket` | all_variance/3 | "Pick up the chocolate pudding and place it in the basket" | different task scene + new object | chocolate_pudding picked and settled in the basket (scene: pudding, OJ, bbq sauce, ketchup, dressing, soup) |
-| `oj_swap_scene` | target_basket_swap_variance/5 | "Pick up the orange juice and place it in the basket" | basket-swap suite, 2 seeds | orange_juice picked and settled in the basket across two basket placements |
-| `pack_scene_all` | libero_object_packing/0 | "Pick all the objects and place them in the basket" *(the suite's own task language, verbatim)* | native packing suite | all 6 movables settled in the basket; the suite's `pack_all_into` reward recorded as an external cross-check |
-
-Seed coverage in the extended run: `soup_basket` and `cream_cheese` at
-3 seeds, `two_inches_right`, `soup_then_milk`, and `oj_swap_scene` at
-2, the rest at 1 (the basket-move case stays on seed 1 where "opposite
-side" is well-defined).
-
-Every executed seed also passes through `scene_sane`: no object may ever
-leave the workspace envelope (flung off the table / through the floor);
-a violation fails the seed regardless of task progress.
+**New scenes** (7 example-local VAB suites under `tasks/`, discovered via
+`GAP_EXTRA_TASK_ROOTS`, physics-settled + drift-verified by
+`probes/author_inits.py` from `probes/zsp_scenes.py` definitions):
+color row (3 ketchup variants + 2 baskets), size pairs, two-container
+sorting (basket + rimmed tray), pre-packed basket, kitchenware (plates/
+mugs/pan), dense clutter with a can lying on its side, flat-box stacking
+with butter pre-stacked.
 
 ## Run it
 
 ```bash
-# criteria self-test on synthetic traces (no sim, no LLM, ~1 s)
+# criteria self-test on synthetic traces (no sim, no LLM, ~1 s;
+# includes v1-parity, per-case layout validation, vacuous-pass guards)
 uv run python examples/zero_shot_prompts/selftest.py
+
+# see the matrix / filter it
+uv run python examples/zero_shot_prompts/run_all.py --list
+uv run python examples/zero_shot_prompts/run_all.py --list --tiers T0,T1 --categories grounding,report
 
 # one case
 MUJOCO_GL=egl uv run python \
     examples/zero_shot_prompts/run_prompt.py \
     --case soup_basket --out outputs/zero_shot_prompts/dev
 
-# the whole matrix (one subprocess per case, per-case timeout,
-# resumable: re-run with the same --out to skip finished cases)
+# the whole matrix: one subprocess per case, per-case timeout + killpg,
+# resumable (same --out skips finished cases), 4 concurrent cases
+# round-robin pinned across GPUs
 MUJOCO_GL=egl uv run python \
     examples/zero_shot_prompts/run_all.py \
-    --out outputs/zero_shot_prompts/run1
+    --out outputs/zero_shot_prompts/run1 --jobs 4 --gpus 0,1,2,3
+
+# phased: fan out all generations first (LLM-bound, no sim), then execute
+run_all.py --out DIR --gen-only --jobs 8
+run_all.py --out DIR --exec-only --jobs 4
+
+# infra-failure retries (never auto-retries FAIL)
+run_all.py --out DIR --retry-verdicts CRASH,NO_TRACE --retries 1
+
+# cross-model comparison (verdict/score matrix + flips)
+uv run python examples/zero_shot_prompts/compare.py outputs/zsp/gemini outputs/zsp/qwen
 ```
 
 Defaults: provider `vertex`, model `gemini-3.1-pro-preview` (override
 with `--provider/--model` or `GAP_LLM_PROVIDER`/`GAP_LLM_MODEL`). If
-`GOOGLE_CLOUD_PROJECT` is unset, the runner uses the ADC quota project
-from `~/.config/gcloud/application_default_credentials.json`. The runner
-also moves `TMPDIR` to the home volume (video frame buffers) and keeps
-`GAP_DECIDE_TRUST_ENV` unset — that flag opts a generated decide-loop
-into trusting the env's *own* task reward, which is not the prompt's
-task.
+`GOOGLE_CLOUD_PROJECT` is unset, the runner uses the ADC quota project.
+The runner moves `TMPDIR` to the home volume, pins each subprocess to a
+GPU (pre-set `CUDA_VISIBLE_DEVICES`/`MUJOCO_EGL_DEVICE_ID` always win),
+exports `GAP_EXTRA_TASK_ROOTS` for the `libero_zsp_*` suites via the
+case's env, and keeps `GAP_DECIDE_TRUST_ENV` unset (a generated
+decide-loop must not trust the env's own reward).
 
 ## How a verdict is produced
 
 ```
 run_all.py ── subprocess + timeout, killpg on hang ──▶ run_prompt.py
   1. generate      gap.agent.generate_sync(prompt)      → <case>/gen/task_00
-  2. per seed      fresh gap.connector.sim(...); StateRecorder wraps
-                   conn.tool_registry.invoke (the single dispatch point
-                   for every script/tool node call);
+  2. per seed      case.env_overrides exported; fresh gap.connector.sim(...);
+                   StateRecorder (trace schema 2) wraps conn.tool_registry.invoke;
                    gap.execute(graph, conn, checkpoints="warn")
                      → seed<k>/events.jsonl   (call/return/error, flushed)
                      → seed<k>/state.jsonl    (ground-truth snapshot per call)
-                     → seed<k>/run_video.mp4  (+ per-camera extras)
-  3. score         criteria.evaluate_seed(...)          → seed<k>/result_seed.json
-                   aggregate (PASS = all seeds pass)    → <case>/result.json
+                     → seed<k>/trace_meta.json, run_video.mp4
+  3. score         zsp.evaluate.evaluate_seed(...)      → seed<k>/result_seed.json
+                   aggregate (all seeds must pass;      → <case>/result.json
+                   aggregate="any_seed" opt-out exists)
 ```
 
-- **Hangs**: the `call` event is written *before* dispatch, so a hung
-  tool leaves an unmatched call as the last flushed line. `run_all.py`
-  kills the process group at the timeout, drops `timeout_marker.json`,
-  and re-scores the partial trace (`run_prompt.py --re-eval`) — the
-  verdict is `TIMEOUT` with the hang site (tool, node, kwargs) attached.
-- **Generation refusals/errors** are their own verdicts (`GEN_REFUSED` /
-  `GEN_ERROR`), never silently converted to task failures.
-- **Anti-gaming**: "picked up" requires the engine's `held_body()` to
-  report the object with the gripper closed *and* the object ≥ 3 cm
-  above its initial height — a nudge doesn't count, and an object that
-  appears in the basket without ever being carried fails the grasp
-  check. Containment mirrors `Body.contains` (±2 cm on the outer AABB —
-  the basket registers no interior cavity on LIBERO, probed).
-- **Re-scoring**: criteria iterate cheaply over saved traces —
-  `run_prompt.py --case X --out DIR --re-eval`. A hand-built graph can
-  be baselined without generation via `--graph <workflow_dir>`.
+- **Verdicts:** `PASS FAIL TIMEOUT CRASH NO_TRACE NOT_RUN GEN_REFUSED
+  GEN_ERROR`. Hangs are first-class: the `call` event is written before
+  dispatch, so a killed run's last unmatched call is the hang site;
+  `run_all.py` re-scores the flushed partial trace (`--re-eval`).
+- **success_source:** `trace` (default — the DSL criterion is the
+  verdict), `env` (the prompt is the env task's native language: the
+  BDDL `check_success` gates, authored checks become weighted
+  partial-progress diagnostics), `both`, `gen` (no execution — the
+  criterion scores the generation record). Cases whose criterion uses
+  the `gen_refused` leaf route a generation refusal INTO evaluation
+  (for absent-object probes, refusing is the correct answer).
+- **Anti-gaming, auto-injected:** `scene_sane` always gates (no movable
+  may ever leave the workspace envelope; probed per-arena bounds);
+  every literal target of a gating containment/stack/on leaf gets an
+  injected gating `picked_up` (held by the engine + gripper closed +
+  risen ≥ 3 cm) unless the case opts out for push tasks; and the
+  selftest's **vacuous-pass guard** requires every criterion to FAIL a
+  do-nothing trace (cases where no-op IS correct declare `vacuous_ok`).
+- **Score** = weight-normalized sum over the case's checks; partial
+  credit comes only from per-primitive fractions (packing fractions,
+  kept-out fractions, relocation progress) — never expression algebra.
 
-## Measured conventions (probed live on `libero_object_all_variance/0`)
+## The criteria DSL (zsp/dsl/)
 
-- Snapshots are in the **robot-base frame**, which in this env equals
-  the MuJoCo world frame (robot0_base at the origin, identity rotation).
-  Tabletop surface ≈ z 0. Movable bodies: alphabet_soup, butter,
-  cream_cheese, milk, salad_dressing, tomato_sauce (+ basket).
-- **Agentview image-right = +y** (from the camera's frame axes: the
-  camera sits at world (0.90, 0, 0.65) looking back toward the robot).
-  The robot's right is −y. `two_inches_right` accepts either reading
-  of "right" and logs the direction taken.
-- The soup can's local z-axis is **horizontal** at rest (asset
-  modeling), so uprightness is measured against the body direction that
-  initially pointed up, not against local z.
-- Initial layouts vary per seed (e.g. the basket spawns at (0.75, 0.03)
-  on seeds 0/2 and (0.71, −0.23) on seed 1) — that variation is what
-  `soup_basket`'s three-seed robustness gate exercises.
-- The executor's own node-visit cap (`GAP_ITERATION_CAP`, default
-  10000) exists precisely to bound *repeated node visits*; whether a
-  generated graph actually contains cycles, and whether nodes were
-  revisited at runtime, are reported per run from the workflow's edge
-  list and the executor's `node_data/<node>/iters/` layout.
+Each case carries a JSON-serializable criterion — no per-case evaluator
+functions:
+
+```json
+{"checks": [
+   {"name": "picked", "weight": 0.3, "expr": {"picked_up": {"target": "alphabet_soup"}}},
+   {"name": "in_basket", "weight": 0.5,
+    "expr": {"in_container": {"target": "alphabet_soup", "container": "basket"}}},
+   {"name": "no_stray", "weight": 0.2, "expr": {"no_new_packing": {"allowed": ["alphabet_soup"]}}}],
+ "options": {"container": "basket"}}
+```
+
+- **Ops:** `and or not eventually always at_end never` (a per-state leaf
+  at the top of a check defaults to `at_end`).
+- **Per-state leaves:** the core `gap.runtime.predicates` registry is
+  reused as-is (`on in near above stack inside_obb xy_within grasped
+  released axis_aligned joint_threshold at_pose`), plus benchmark extras
+  (`in_container` — v1 resting-in-basket semantics, cavity-aware,
+  contact required on schema-2 traces; `resting_on on_table settled held
+  near_point offset_along joint_open count_in ee_near`).
+- **Trace-level leaves** (cross-time, the reason the core goal-AST alone
+  wasn't enough): `picked_up never_held before displaced relocated
+  tilt_from_initial untouched all_untouched no_new_packing kept_out
+  packed_or_consumed pack_report reported env_success exit_status
+  gen_refused scene_sane attempt_count colinear workflow_has_cycle
+  node_revisits`.
+- **`{"$t0": ...}` derived referents,** resolved against the first
+  snapshot and echoed into diagnostics: `closest_to farthest_from
+  extreme middle_of largest smallest midpoint pos_of count_within
+  distance` — how "whichever object is closest to the basket" stays a
+  single criterion whose answer changes per seed.
+- `validate_criterion` checks every case statically — against its probed
+  layout, so a typo'd body name fails the selftest, not a GPU run.
+
+## Ground truth: traces, layouts, probes
+
+- **state.jsonl (schema 2):** one snapshot per tool call (+ `__initial__`
+  / `__final__`), robot-base frame: per body `p q lo hi v g` plus `c`
+  (contacts), `j` (articulated joint qpos — drawers/knobs/doors), `cav`
+  (interior cavity when a `<body>__cavity` site exists); top-level
+  `held/grip/ee`; sidecar `trace_meta.json`. v1 traces still evaluate
+  (contact checks degrade gracefully); raw MuJoCo handles come from
+  `gap.connector.world_adapter.raw_mujoco_handles`, and if they're ever
+  unreachable the recorder degrades instead of crashing.
+- **layouts/** are checked-in probe dumps (`probes/dump_scene.py`) of
+  every scene the corpus references — body poses/extents, articulated
+  joint names/ranges (e.g. `wooden_cabinet_1_middle_level` slide
+  [-0.16, 0.01]; `flat_stove_1_button` hinge [-0.005, 2.1]), cameras,
+  native task language. They are the single source for criterion
+  thresholds, selftest traces (`zsp/selftest/layouts.py` TraceBuilder),
+  and static case validation. Never hand-write scene constants.
+- Measured conventions: snapshots are ROBOT-BASE frame (the floor-arena
+  base sits at world (-0.6, 0, 0) — not at the origin as an earlier
+  version of this README claimed; everything is consistently
+  base-framed). Agentview image-right = +y (camera at world
+  (0.90, 0, 0.65)); tabletop ≈ z 0 in the floor arenas; classic
+  mounted-table scenes carry probed `scene_sane` bounds in their case
+  options; `_1` body suffixes appear on classic suites only. The VAB
+  packing suites TELEPORT contained objects to (50.6, 50.0) — handled
+  by `env_consumes_packed` + `packed_or_consumed`.
+
+## Adding a case
+
+1. Pick the scene; if it's new, define it in `probes/zsp_scenes.py`, run
+   `probes/author_inits.py --suite <name>`, then probe layouts:
+   `probes/dump_scene.py --suite <name> --task 0 --seeds 0,1,2`.
+2. Add a `Case` to the right `zsp/cases/<category>.py` (or `expand()` a
+   template): prompt (measurable phrasing), tier, seeds, timeout,
+   `success_source`, and a DSL criterion with weighted checks.
+3. `uv run python examples/zero_shot_prompts/selftest.py` — schema
+   validation, layout cross-check, and the vacuous-pass guard run for
+   every registered case automatically.
+4. Smoke it: `run_prompt.py --case <id> --out outputs/dev`.
+
+## Reward oracle / RL task pool
+
+The benchmark doubles as a graph-codegen reward source:
+
+- **Score any workflow against any case** without an LLM:
+  `run_prompt.py --case X --out DIR --graph <workflow_dir>` (exit 0 =
+  PASS), or in-process via `zsp.evaluate.evaluate_seed(case, states,
+  events, execution, extras)` over a recorded trace.
+- **Export the corpus as JSONL** for an external harness:
+  `run_all.py --export-manifest cases.jsonl` (curated 97) or
+  `--expand full` (+140 template-expanded pick/relation/order tasks over
+  every variance scene — a procedural task pool; generation is
+  deterministic from the checked-in layouts).
+- Per-seed scalar scores in [0, 1] live in `result_seed.json`; the
+  anti-gaming injections (grasp-and-lift, scene sanity, vacuous-pass
+  guard) are exactly the properties a reward must have to resist
+  hacking.
 
 ## Outputs
 
-`<out>/report.md` (rebuild with `run_all.py --out DIR --report-only`)
-holds the verdict table plus per-seed checks and diagnostics. Every
-claim is auditable: `state.jsonl` (ground truth per tool call),
-`events.jsonl` (every call with kwargs/result summaries), `graph.txt` +
-`gen/task_00/` (the generated graph), `trace/` (executor trace),
-`run_video.mp4` (what a human would have watched).
+`<out>/report.md` (rebuild: `run_all.py --out DIR --report-only`) opens
+with the **category × tier scorecard** (n / gen-ok / pass / timeout /
+mean score) and the per-template object breakdowns, then per-case rows
+and full detail (checks with ✔/✘ and injected markers, hang sites,
+planner errors, node revisits, $t0 referent resolutions, criterion JSON).
+`report.json` + `run_meta.json` feed `compare.py`. Every claim is
+auditable: `state.jsonl`, `events.jsonl`, `trace_meta.json`, `graph.txt`
++ `gen/task_00/`, `trace/`, `run_video.mp4`.

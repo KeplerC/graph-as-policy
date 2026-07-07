@@ -1,0 +1,23 @@
+{
+ "version": 3,
+ "meta": {
+  "name": "do_nothing",
+  "description": "Reference for 'do nothing / leave the table as it is': observe once and exit successfully, moving nothing. Proves a benign no-op graph is expressible and the criterion (everything untouched) accepts it."
+ },
+ "nodes": {
+  "observe": {
+   "type": "tool",
+   "tool": "robot.get_observation"
+  },
+  "done": {
+   "type": "end",
+   "status": "success"
+  }
+ },
+ "edges": [
+  ["START", "observe"],
+  ["observe", "done"]
+ ],
+ "conditional_edges": {},
+ "subgraphs": {}
+}

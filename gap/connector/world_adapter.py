@@ -77,6 +77,25 @@ def find_mujoco_sim(env: Any) -> Any | None:
     return None
 
 
+def raw_mujoco_handles(env: Any) -> tuple[Any, Any] | None:
+    """Raw MuJoCo ``(MjModel, MjData)`` beneath the env, or ``None``.
+
+    robosuite's binding wrappers keep the raw pybind objects at
+    ``model._model`` / ``data._data``; plain mujoco sims pass through
+    unchanged. The raw handles are what name-lookup APIs
+    (``mujoco.mj_id2name`` etc.) and
+    :meth:`gap.runtime.predicates.goal_eval.SimState.from_mujoco` require.
+    """
+    sim = find_mujoco_sim(env)
+    if sim is None:
+        return None
+    model = getattr(sim.model, "_model", sim.model)
+    data = getattr(sim.data, "_data", sim.data)
+    if model is None or data is None:
+        return None
+    return model, data
+
+
 def _find_object_map(env: Any) -> dict[str, int] | None:
     """Find the env's ``{object_name: root_body_id}`` registry, if any."""
     seen: set[int] = set()
@@ -523,4 +542,4 @@ class LiberoWorldAdapter:
         )
 
 
-__all__ = ["LiberoWorldAdapter", "find_mujoco_sim"]
+__all__ = ["LiberoWorldAdapter", "find_mujoco_sim", "raw_mujoco_handles"]

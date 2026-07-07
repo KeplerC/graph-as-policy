@@ -1,0 +1,40 @@
+id: libero_zsp_sorting.two_containers
+language: "Sort the groceries: put the two cans in the basket and the two boxes on the wooden tray"
+arena: {name: floor}
+robot: {name: panda, controller: OSC_POSE}
+cameras: [agentview, robot0_eye_in_hand]
+camera_height: 128
+camera_width: 128
+camera_depth: false
+objects:
+- {id: basket, asset: basket}
+- {id: wooden_tray, asset: wooden_tray}
+- {id: alphabet_soup, asset: alphabet_soup}
+- {id: tomato_sauce, asset: tomato_sauce}
+- {id: butter, asset: butter}
+- {id: cream_cheese, asset: cream_cheese}
+inits:
+- basket: [0.120000, -0.200013, -0.004582, -0.001694, 0.001694, 0.707105, 0.707105]
+  wooden_tray: [0.119998, 0.200004, 0.000603, 0.001210, 0.001720, 0.000001, 0.999998]
+  alphabet_soup: [-0.160004, -0.099999, 0.038393, 0.002258, 0.707706, 0.706500, -0.002258]
+  tomato_sauce: [-0.060004, 0.099997, 0.038393, 0.002262, 0.707676, 0.706530, -0.002262]
+  butter: [-0.160000, 0.100000, 0.008695, 0.000000, 0.000000, 1.000000, 0.000000]
+  cream_cheese: [-0.060000, -0.100000, 0.008921, 0.000000, 0.000000, 1.000000, 0.000000]
+- basket: [0.120000, 0.199987, -0.004582, -0.001694, 0.001694, 0.707105, 0.707105]
+  wooden_tray: [0.119998, -0.199996, 0.000603, 0.001210, 0.001720, 0.000001, 0.999998]
+  alphabet_soup: [-0.060004, 0.100001, 0.038393, 0.002258, 0.707706, 0.706500, -0.002258]
+  tomato_sauce: [-0.160004, -0.100003, 0.038393, 0.002262, 0.707676, 0.706530, -0.002262]
+  butter: [-0.060000, -0.100000, 0.008695, 0.000000, 0.000000, 1.000000, -0.000000]
+  cream_cheese: [-0.160000, 0.100000, 0.008921, 0.000000, 0.000000, 1.000000, 0.000000]
+- basket: [0.120000, -0.200013, -0.004582, -0.001694, 0.001694, 0.707105, 0.707105]
+  wooden_tray: [0.119856, 0.199720, 0.006609, 0.001198, 0.021474, -0.001177, 0.999768]
+  alphabet_soup: [-0.160004, 0.120001, 0.038393, 0.002258, 0.707706, 0.706500, -0.002258]
+  tomato_sauce: [-0.060004, -0.100003, 0.038393, 0.002262, 0.707676, 0.706530, -0.002262]
+  butter: [-0.160000, -0.100000, 0.008695, 0.000000, 0.000000, 1.000000, 0.000000]
+  cream_cheese: [-0.060026, 0.119981, 0.008857, 0.000795, -0.000230, 1.000000, 0.000086]
+default_init_index: 0
+success:
+  predicate: contained_in
+  args: {"obj": "alphabet_soup", "container": "basket", "xy_tol": 0.1, "z_low": -0.05, "z_high": 0.25}
+horizon: 500
+metadata: {"suite": "libero_zsp_sorting", "source": "authored_zsp", "n_inits": 3}

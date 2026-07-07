@@ -1,0 +1,44 @@
+id: libero_zsp_clutter.dense_grocery
+language: Put the popcorn in the basket
+arena: {name: floor}
+robot: {name: panda, controller: OSC_POSE}
+cameras: [agentview, robot0_eye_in_hand]
+camera_height: 128
+camera_width: 128
+camera_depth: false
+objects:
+- {id: popcorn, asset: popcorn}
+- {id: macaroni_and_cheese, asset: macaroni_and_cheese}
+- {id: cookies, asset: cookies}
+- {id: yellow_cookies, asset: yellow_cookies}
+- {id: orange_juice, asset: orange_juice}
+- {id: tomato_sauce, asset: tomato_sauce}
+- {id: basket, asset: basket}
+inits:
+- popcorn: [-0.11, -0.112342, 0.009985, 0, -0, 0, 1]
+  macaroni_and_cheese: [-0.11, -0.028963, 0.012705, 0, 0, 0, 1]
+  cookies: [-0.11, 0.179449, 0.009385, 0, 0, 0, 1]
+  yellow_cookies: [-0.01, -0.09, 0.009385, 0, -0, 0, 1]
+  orange_juice: [-0.01, 0, 0.069735, 0.5, 0.5, 0.5, 0.5]
+  tomato_sauce: [-0.010199, 0.100033, 0.031192, 0.499832, 0.500681, 0.49932, -0.500166]
+  basket: [0.14, 0.209987, -0.004582, -0.001694, 0.001694, 0.707105, 0.707105]
+- popcorn: [-0.11, 0.09, 0.009985, 0, 0, 0, 1]
+  macaroni_and_cheese: [-0.009208, -0.01725, 0.012705, 0, 0, 0.001344, 0.999999]
+  cookies: [-0.01, 0.179449, 0.009385, 0, -0, -0, 1]
+  yellow_cookies: [-0.11, -0.09, 0.009385, 0, -0, 0, 1]
+  orange_juice: [-0.11, 0, 0.069735, 0.5, 0.5, 0.5, 0.5]
+  tomato_sauce: [-0.010176, -0.103477, 0.031192, 0.501135, 0.499377, 0.500622, -0.498863]
+  basket: [0.14, 0.209987, -0.004582, -0.001694, 0.001694, 0.707105, 0.707105]
+- popcorn: [-0.11, 0, 0.009985, 0, 0, 0, 1]
+  macaroni_and_cheese: [-0.11, 0.09, 0.012705, 0, 0, 0, 1]
+  cookies: [-0.11, -0.09, 0.009385, 0, -0, -0, 1]
+  yellow_cookies: [-0.01, 0, 0.009385, 0, 0, 0, 1]
+  orange_juice: [-0.01, -0.09, 0.069735, 0.5, 0.5, 0.5, 0.5]
+  tomato_sauce: [-0.010199, 0.100033, 0.031192, 0.499832, 0.500681, 0.49932, -0.500166]
+  basket: [0.14, -0.210013, -0.004582, -0.001694, 0.001694, 0.707105, 0.707105]
+default_init_index: 0
+success:
+  predicate: contained_in
+  args: {"obj": "popcorn", "container": "basket", "xy_tol": 0.1, "z_low": -0.05, "z_high": 0.25}
+horizon: 500
+metadata: {"suite": "libero_zsp_clutter", "source": "authored_zsp", "n_inits": 3}
