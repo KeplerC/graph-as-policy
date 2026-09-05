@@ -945,3 +945,91 @@ def test_execute_facade_failure_and_builder_duck_type(tmp_path: Path) -> None:
     assert result.success is False
     assert result.exit_status == "failure"
     assert isinstance(result.error, PipelineError)
+
+
+# ---------------------------------------------------------------------------
+# A subgraph's inputs bind at the call site
+# ---------------------------------------------------------------------------
+
+
+def _passing_workflow(site_inputs: dict) -> dict:
+    """One subgraph declaring an input; the calling node passes `site_inputs`."""
+    return {
+        "version": 3,
+        "meta": {},
+        "nodes": {
+            "seed": {"type": "tool", "tool": "stub.const", "inputs": {"value": 7}},
+            "run": {"type": "subgraph", "ref": "run_sg", "inputs": site_inputs},
+            "done": {"type": "end", "status": "success"},
+        },
+        "edges": [["START", "seed"], ["seed", "run"]],
+        "conditional_edges": {
+            "run": {"router_field": "exit", "mapping": {"ok": "done"}},
+        },
+        "subgraphs": {
+            "run_sg": {
+                "skill": "generic",
+                "inputs": {"arm_id": "int"},
+                "outputs": {},
+                "nodes": {
+                    "use": {
+                        "type": "tool", "tool": "stub.use",
+                        "inputs": {"arm_id": {"$ref": "in.arm_id"}},
+                    },
+                    "ok": {"type": "noop"},
+                },
+                "edges": [["START", "use"], ["use", "ok"], ["ok", "END"]],
+                "conditional_edges": {},
+                "exit": {"router_field": None, "success_values": ["ok"]},
+            },
+        },
+    }
+
+
+def test_subgraph_input_binds_from_a_literal_at_the_call_site(tmp_path: Path) -> None:
+    """`{"inputs": {"arm_id": 0}}` on the calling node is the value the
+    subgraph runs with -- WORKFLOW_FORMAT's promise, and the shape that
+    aborted before its first node for five self-learning iterations."""
+    seen: list[int] = []
+    reg = _registry({
+        "stub.const": lambda value: {"value": value},
+        "stub.use": lambda arm_id: seen.append(arm_id) or {"arm_id": arm_id},
+    })
+    wf_dir = _write_workflow(tmp_path, _passing_workflow({"arm_id": 0}))
+    ex = _executor(wf_dir, reg, trace_dir=tmp_path / "trace")
+    ex.execute()
+    assert ex.exit_status == "success"
+    assert seen == [0]
+
+
+def test_subgraph_input_binds_from_a_ref_at_the_call_site(tmp_path: Path) -> None:
+    """A `$ref` into the caller's scope is resolved the way script nodes do."""
+    seen: list[int] = []
+    reg = _registry({
+        "stub.const": lambda value: {"value": value},
+        "stub.use": lambda arm_id: seen.append(arm_id) or {"arm_id": arm_id},
+    })
+    wf_dir = _write_workflow(tmp_path, _passing_workflow({"arm_id": {"$ref": "seed.value"}}))
+    ex = _executor(wf_dir, reg, trace_dir=tmp_path / "trace")
+    ex.execute()
+    assert seen == [7]
+
+
+def test_unbound_subgraph_input_leaves_a_trace_naming_the_node(tmp_path: Path) -> None:
+    """A binding failure happens before any node runs; it must still write the
+    trace and blame the node, or it reads downstream as 'ran and did nothing'."""
+    reg = _registry({
+        "stub.const": lambda value: {"value": value},
+        "stub.use": lambda arm_id: {"arm_id": arm_id},
+    })
+    # Passing a $ref to a field the producer never emits passes W8 (the site
+    # names the input) and fails at bind time -- the one failure that happens
+    # before any node runs.
+    wf_dir = _write_workflow(tmp_path, _passing_workflow({"arm_id": {"$ref": "seed.missing"}}))
+    ex = _executor(wf_dir, reg, trace_dir=tmp_path / "trace")
+    with pytest.raises(PipelineError, match="arm_id"):
+        ex.execute()
+    trace = json.loads((tmp_path / "trace" / "dag_trace.json").read_text())
+    errors = [e for e in trace["events"] if e["event_type"] == "error_recorded"]
+    assert errors and errors[0]["node_name"] == "run"
+    assert "arm_id" in errors[0]["detail"]["error"]
