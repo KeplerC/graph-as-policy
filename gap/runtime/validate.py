@@ -1177,33 +1177,81 @@ def _check_cross_subgraph_io(
                 reachable_sgs.add(node.ref)
             stack.append(nxt)
 
-    # Producers: subgraphs that declare an output of a given name.
-    producers: dict[str, list[str]] = {}
-    for sg_name in reachable_sgs:
-        sg = wf.subgraphs.get(sg_name)
-        if sg is None:
-            continue
-        for out_name in sg.outputs:
-            producers.setdefault(out_name, []).append(sg_name)
+    # Producers, per top-level SITE. The executor binds a subgraph's inputs
+    # from the outputs of subgraphs that have already RUN (plus whatever the
+    # calling node passes), so "some reachable subgraph declares this name"
+    # is not the question -- "a subgraph that always runs before this call
+    # site declares it" is. Checking the weaker question passed two shapes
+    # that abort at runtime before any node: a subgraph that produces its own
+    # input, and a producer that sits later on the path or on a sibling
+    # branch. Both cost whole self-learning runs, because the abort happens
+    # before the first node and reads downstream as "the graph did nothing".
+    node_of: dict[str, list[str]] = {}
+    for node_name in seen:
+        node = wf.nodes.get(node_name)
+        if node is not None and node.type == "subgraph" and node.ref:
+            node_of.setdefault(node.ref, []).append(node_name)
 
-    # Consumers: each reachable subgraph's declared inputs must have a producer.
-    for sg_name in reachable_sgs:
+    # Reverse edges over the top level, for the ancestor walk.
+    rev: dict[str, set[str]] = {}
+    for src, dsts in out.items():
+        for dst in dsts:
+            rev.setdefault(dst, set()).add(src)
+
+    def _ancestors(target: str) -> set[str]:
+        """Every node that can precede *target* on some path from START."""
+        seen_anc: set[str] = set()
+        stack = [target]
+        while stack:
+            for parent in rev.get(stack.pop(), ()):
+                if parent not in seen_anc:
+                    seen_anc.add(parent)
+                    stack.append(parent)
+        seen_anc.discard(target)
+        return seen_anc
+
+    ancestors_cache: dict[str, set[str]] = {}
+
+    def _anc(node_name: str) -> set[str]:
+        if node_name not in ancestors_cache:
+            ancestors_cache[node_name] = _ancestors(node_name)
+        return ancestors_cache[node_name]
+
+    for sg_name in sorted(reachable_sgs):
         sg = wf.subgraphs.get(sg_name)
         if sg is None:
             continue
-        for in_name, in_type in sg.inputs.items():
-            if (
-                in_name == OBSERVATION_STREAM_INPUT_NAME
-                and in_type.endswith(_OBSERVATION_STREAM_TYPE_NAME)
-            ):
-                continue
-            if in_name not in producers:
+        for site in sorted(node_of.get(sg_name, [])):
+            site_node = wf.nodes.get(site)
+            passed = set(site_node.inputs) if site_node is not None else set()
+            before = _anc(site)
+            upstream: set[str] = set()
+            for other in before:
+                other_node = wf.nodes.get(other)
+                if other_node is None or other_node.type != "subgraph":
+                    continue
+                producer = wf.subgraphs.get(other_node.ref or "")
+                if producer is not None and other_node.ref != sg_name:
+                    upstream.update(producer.outputs)
+            for in_name, in_type in sg.inputs.items():
+                if (
+                    in_name == OBSERVATION_STREAM_INPUT_NAME
+                    and in_type.endswith(_OBSERVATION_STREAM_TYPE_NAME)
+                ):
+                    continue
+                if in_name in passed or in_name in upstream:
+                    continue
                 issues.append(_issue(
                     "error",
                     f"subgraphs.{sg_name}.inputs.{in_name}",
-                    f"input {in_name!r} (type {in_type!r}) has no upstream "
-                    f"producer subgraph that declares an output named "
-                    f"{in_name!r} (W8)",
+                    f"input {in_name!r} (type {in_type!r}) is unbound at call "
+                    f"site {site!r}: no subgraph that runs before it declares "
+                    f"an output named {in_name!r}, and the node passes no "
+                    f"value for it. Either produce it upstream (a subgraph's "
+                    f"own outputs do not bind its own inputs) or pass it at "
+                    f"the call site: "
+                    f'"{site}": {{"type": "subgraph", "ref": "{sg_name}", '
+                    f'"inputs": {{"{in_name}": ...}}}} (W8)',
                 ))
 
     return issues

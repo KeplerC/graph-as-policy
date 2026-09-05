@@ -627,3 +627,83 @@ def test_real_example_validates(path: str) -> None:
     issues = validate_workflow(wf)
     errors = [i for i in issues if i.severity == "error"]
     assert errors == [], f"{path}: {[(i.node_id, i.message) for i in errors]}"
+
+
+# ---------------------------------------------------------------------------
+# W8: inputs are bound per call site, in execution order
+# ---------------------------------------------------------------------------
+
+
+def test_w8_accepts_an_input_passed_at_the_call_site(tmp_path: Path) -> None:
+    """A literal on the calling node satisfies the input it names.
+
+    WORKFLOW_FORMAT tells authors that literals are passed as plain JSON, and
+    the executor binds them; a rule that ignored them refused graphs that run.
+    """
+    raw = _minimal_workflow()
+    raw["subgraphs"]["sg_def"]["inputs"] = {"arm_id": "int"}
+    raw["nodes"]["sg"]["inputs"] = {"arm_id": 0}
+    issues = validate_workflow(load_workflow(_write_workflow(tmp_path, raw)))
+    assert not any("W8" in i.message for i in issues), issues
+
+
+def test_w8_rejects_a_subgraph_that_produces_its_own_input(tmp_path: Path) -> None:
+    """Self-production is not production: the executor binds from subgraphs
+    that have already run, and a subgraph has not run when its inputs bind."""
+    raw = _minimal_workflow()
+    raw["subgraphs"]["sg_def"]["inputs"] = {"arm_id": "int"}
+    raw["subgraphs"]["sg_def"]["outputs"] = {"arm_id": {"$ref": "step.arm_id"}}
+    issues = validate_workflow(load_workflow(_write_workflow(tmp_path, raw)))
+    assert any("W8" in i.message for i in issues), issues
+
+
+def test_w8_rejects_a_producer_that_runs_after_the_consumer(tmp_path: Path) -> None:
+    """A producer downstream of the consumer satisfies "exists" but not
+    "has run" -- the shape that aborted before the first node."""
+    raw = _minimal_workflow()
+    raw["subgraphs"]["sg_def"]["inputs"] = {"grasp_pose": "Se3Pose"}
+    raw["subgraphs"]["later_def"] = {
+        "skill": "generic",
+        "inputs": {},
+        "outputs": {"grasp_pose": {"$ref": "step.pose"}},
+        "nodes": {
+            "step": {"type": "tool", "tool": "robot.go_home", "inputs": {}},
+            "ok": {"type": "noop"},
+        },
+        "edges": [["START", "step"], ["step", "ok"], ["ok", "END"]],
+        "conditional_edges": {},
+        "exit": {"router_field": None, "success_values": ["ok"]},
+    }
+    raw["nodes"]["later"] = {"type": "subgraph", "ref": "later_def"}
+    raw["conditional_edges"]["sg"]["mapping"]["ok"] = "later"
+    raw["conditional_edges"]["later"] = {
+        "router_field": "exit", "mapping": {"ok": "done"},
+    }
+    issues = validate_workflow(load_workflow(_write_workflow(tmp_path, raw)))
+    assert any("W8" in i.message for i in issues), issues
+
+
+def test_w8_accepts_a_producer_upstream_of_the_consumer(tmp_path: Path) -> None:
+    """The same two subgraphs in the order that works."""
+    raw = _minimal_workflow()
+    raw["subgraphs"]["sg_def"]["inputs"] = {"grasp_pose": "Se3Pose"}
+    raw["subgraphs"]["first_def"] = {
+        "skill": "generic",
+        "inputs": {},
+        "outputs": {"grasp_pose": {"$ref": "step.pose"}},
+        "nodes": {
+            "step": {"type": "tool", "tool": "robot.go_home", "inputs": {}},
+            "ok": {"type": "noop"},
+        },
+        "edges": [["START", "step"], ["step", "ok"], ["ok", "END"]],
+        "conditional_edges": {},
+        "exit": {"router_field": None, "success_values": ["ok"]},
+    }
+    raw["nodes"]["first"] = {"type": "subgraph", "ref": "first_def"}
+    raw["edges"] = [["START", "first"]]
+    raw["conditional_edges"] = {
+        "first": {"router_field": "exit", "mapping": {"ok": "sg"}},
+        "sg": {"router_field": "exit", "mapping": {"ok": "done"}},
+    }
+    issues = validate_workflow(load_workflow(_write_workflow(tmp_path, raw)))
+    assert not any("W8" in i.message for i in issues), issues

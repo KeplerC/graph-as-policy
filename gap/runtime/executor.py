@@ -327,6 +327,18 @@ class WorkflowExecutor:
 
         try:
             self._run_top_level()
+        except Exception:
+            # A failure before the first node completes would otherwise leave
+            # no dag_trace.json at all -- and a reader with no trace cannot
+            # tell "the graph aborted at load" from "the graph ran and did
+            # nothing", which is exactly the confusion that cost a
+            # self-learning run five iterations. The trace already holds the
+            # error event; write it out before the exception leaves.
+            try:
+                self.trace.flush()
+            except Exception:  # noqa: BLE001 - never mask the original failure
+                logger.debug("could not flush the trace after a failure", exc_info=True)
+            raise
         finally:
             if self.observation_stream is not None:
                 self.observation_stream.stop()
@@ -730,7 +742,17 @@ class WorkflowExecutor:
             )
 
         logger.info("--- Subgraph '%s' ---", sg_name)
-        bound_inputs = self._bind_subgraph_inputs(sg_name, sg)
+        try:
+            bound_inputs = self._bind_subgraph_inputs(
+                sg_name, sg, node, parent_scope,
+            )
+        except PipelineError as exc:
+            # Blame the node, not the workflow: a binding failure is the one
+            # error that happens before any node runs, so without this the
+            # trace names nothing and the failure reads as "the graph ran and
+            # did nothing".
+            self.trace.record_error(node_name, str(exc))
+            raise
 
         scope = _ScopeState()
         scope.local_outputs[RESERVED_INPUT_PSEUDOSTATE] = bound_inputs
@@ -904,16 +926,56 @@ class WorkflowExecutor:
         )
 
     def _bind_subgraph_inputs(
-        self, sg_name: str, sg: SubgraphDef,
+        self,
+        sg_name: str,
+        sg: SubgraphDef,
+        node: NodeDef | None = None,
+        scope: _ScopeState | None = None,
     ) -> dict[str, Any]:
-        """Bind a subgraph's declared inputs from upstream cross-subgraph outputs."""
+        """Bind a subgraph's declared inputs at one call site.
+
+        Three sources, in precedence order, because a subgraph is a callee
+        and its caller is entitled to say what it is called with:
+
+        1. **The calling node's own ``inputs``** -- a literal, or a ``$ref``
+           into the caller's scope. WORKFLOW_FORMAT tells authors "literals
+           are passed as plain JSON", and script nodes have always honoured
+           them; a subgraph node ignoring them was the difference between a
+           graph the validator accepts and a graph that raises before its
+           first node. Measured: a workflow whose entry subgraph declared
+           ``arm_id`` and was called with ``{"inputs": {"arm_id": 0}}``
+           aborted in 60 of 60 episodes across five self-learning
+           iterations, and every episode was reported to the improver as a
+           near miss.
+        2. The latest cross-subgraph output of the same name.
+        3. The facade's ``initial_inputs``.
+
+        A name none of the three answers is still an error: a subgraph
+        cannot run without a declared input, and failing here names the
+        input, where failing later names whatever the script did with
+        ``None``.
+        """
+        site: dict[str, Any] = {}
+        if node is not None and node.inputs:
+            local = scope.local_outputs if scope is not None else {}
+            passed = {k: v for k, v in node.inputs.items() if k in sg.inputs}
+            if passed:
+                try:
+                    site = resolve_inputs(passed, local)
+                except Exception as exc:  # noqa: BLE001 - reported as a bind failure
+                    raise PipelineError(
+                        f"subgraph node for {sg_name!r}: cannot resolve the "
+                        f"inputs it passes ({sorted(passed)}): {exc}"
+                    ) from exc
         bound: dict[str, Any] = {}
         for in_name in sg.inputs:
-            value = self._lookup_cross_subgraph_output(in_name)
+            value = site.get(in_name)
+            if value is None:
+                value = self._lookup_cross_subgraph_output(in_name)
             if value is None:
                 raise PipelineError(
                     f"subgraph {sg_name!r} input {in_name!r} has no upstream "
-                    f"producer"
+                    f"producer and the calling node passes no value for it"
                 )
             bound[in_name] = value
         return bound
