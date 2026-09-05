@@ -367,6 +367,14 @@ class DagTrace:
         node = self._node_map.get(name)
         if node:
             node.started_at = time.time()
+            # A new visit re-opens the node. end_node() refuses to close a
+            # node whose earlier visit already closed (its finished_at guard),
+            # so without this reset every re-visited node -- a retry ladder,
+            # a loop back through a router -- stayed "running" in the table
+            # forever, and a node that failed on its second visit was never
+            # marked "error" anywhere but in the event stream.
+            node.finished_at = 0.0
+            node.error_message = None
             node.status = "running"
             node.visits += 1
             self._record_event(
