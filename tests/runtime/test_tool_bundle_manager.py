@@ -24,6 +24,7 @@ from gap.runtime.tool_bundle_boot import (
 )
 from gap.runtime.tool_bundle_manager import (
     ToolBundleManager,
+    shared_client_counts,
     ToolBundleStartupError,
 )
 
@@ -115,6 +116,91 @@ def fake_client_cls(monkeypatch):
 # ---------------------------------------------------------------------------
 # ToolBundleManager
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _clean_shared_clients():
+    """The client cache is process-global by design, so a test that leaks a
+    reference would be read by the next one as a shared server."""
+    from gap.runtime import tool_bundle_manager as tbm
+
+    tbm._SHARED.clear()
+    yield
+    tbm._SHARED.clear()
+
+
+def _two_worlds(tmp_path, fake_client_cls):
+    """Two managers, two registries, one bundle -- a wave of two worlds."""
+    registry = _FakeSkillRegistry({
+        "sam3": _FakeSkillInfo(bundle_dir=tmp_path / "sam3", protocol="stdio-msgpack"),
+    })
+    return [
+        ToolBundleManager(skill_registry=registry, tool_registry=ToolRegistry())
+        for _ in range(2)
+    ]
+
+
+def test_two_worlds_share_one_server(fake_client_cls, tmp_path):
+    """The reason this exists. Twelve worlds booting twelve segmenters is
+    6.3 GiB of GPU each and an out-of-memory crash mid-wave; they are one
+    process and want one server."""
+    first, second = _two_worlds(tmp_path, fake_client_cls)
+    first.boot_all(["sam3"])
+    second.boot_all(["sam3"])
+    assert len(fake_client_cls) == 1, "a second world spawned a second subprocess"
+    assert shared_client_counts() == {"sam3": 2}
+    # Both registries dispatch, and to the same process.
+    assert first._managed["sam3"].client is second._managed["sam3"].client
+
+
+def test_the_server_outlives_the_first_world_to_finish(fake_client_cls, tmp_path):
+    """Worlds of a wave end at different steps. The first to call shutdown
+    must not close a server its neighbours are mid-call on."""
+    first, second = _two_worlds(tmp_path, fake_client_cls)
+    first.boot_all(["sam3"])
+    second.boot_all(["sam3"])
+    client = fake_client_cls[0]
+    first.shutdown_all()
+    assert not client.closed, "the first world to finish killed the shared server"
+    assert shared_client_counts() == {"sam3": 1}
+    second.shutdown_all()
+    assert client.closed
+    assert shared_client_counts() == {}
+
+
+def test_shutdown_stays_idempotent_when_shared(fake_client_cls, tmp_path):
+    """A double shutdown must not release a reference it does not hold."""
+    first, second = _two_worlds(tmp_path, fake_client_cls)
+    first.boot_all(["sam3"])
+    second.boot_all(["sam3"])
+    first.shutdown_all()
+    first.shutdown_all()
+    assert shared_client_counts() == {"sam3": 1}
+    assert not fake_client_cls[0].closed
+
+
+def test_a_different_environment_is_a_different_server(fake_client_cls, tmp_path):
+    """Two graphs asking for one bundle under different ``serving.env`` want
+    different processes; handing the second the first's would be a silent
+    wrong answer."""
+    one = ToolBundleManager(
+        skill_registry=_FakeSkillRegistry({
+            "sam3": _FakeSkillInfo(bundle_dir=tmp_path / "sam3",
+                                   protocol="stdio-msgpack", env={"GAP_SAM3_DEVICE": "cuda:0"}),
+        }),
+        tool_registry=ToolRegistry(),
+    )
+    two = ToolBundleManager(
+        skill_registry=_FakeSkillRegistry({
+            "sam3": _FakeSkillInfo(bundle_dir=tmp_path / "sam3",
+                                   protocol="stdio-msgpack", env={"GAP_SAM3_DEVICE": "cuda:1"}),
+        }),
+        tool_registry=ToolRegistry(),
+    )
+    one.boot_all(["sam3"])
+    two.boot_all(["sam3"])
+    assert len(fake_client_cls) == 2
+    assert shared_client_counts() == {"sam3": 1}
 
 
 def test_boot_registers_catalog_under_rpc_transport(fake_client_cls, tmp_path):
