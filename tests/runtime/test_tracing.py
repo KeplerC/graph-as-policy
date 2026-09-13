@@ -201,7 +201,7 @@ def test_dag_trace_end_to_end(tmp_path):
         "id", "name", "node_type", "service", "method", "script",
         "started_at", "finished_at", "duration_ms", "status",
         "condition", "condition_result", "error_message",
-        "has_inputs", "has_output", "assets",
+        "has_inputs", "has_output", "visits", "assets",
     }
     assert node["id"] == "n_0000"
     assert node["name"] == "grab_frame"
@@ -209,6 +209,7 @@ def test_dag_trace_end_to_end(tmp_path):
     assert node["status"] == "ok"
     assert node["has_inputs"] is True
     assert node["has_output"] is True
+    assert node["visits"] == 1
     assert node["duration_ms"] >= 0.0
     assert sorted(node["assets"]) == [
         "assets/output_frame_depth_depth.npy",

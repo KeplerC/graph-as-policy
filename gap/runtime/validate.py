@@ -49,6 +49,20 @@ Rules (v3):
          when ``router_field`` is set, success values are returned
          field-strings and must not collide with node names.
 
+  Skill contract (when ``skill_registry`` is provided and a subgraph's
+  ``skill`` names a bundle in it -- see :func:`_check_skill_contract`):
+    SK1. With ``exit.router_field`` set, every ``exit.success_values``
+         entry is an exit the bundle's ``exit_conditions`` declares
+         (error); with ``router_field`` null the success values are the
+         subgraph's own terminal nodes, and one outside that vocabulary
+         is a warning, as is ``on_error`` outside it.
+    SK2. When the bundle declares ``canonical_scripts``, some
+         ``type: script`` node names one of them.
+    SK3. A node naming a canonical script binds every ``run()``
+         parameter without a default, and nothing ``run()`` rejects.
+    SK4. A subgraph output bound to such a node names a field its
+         ``run()`` returns.
+
 Declared subgraph input types ("PointCloud", "Se3Pose", ...) resolve
 through the :mod:`gap.schema` type registry; an unknown type name
 surfaces as an error-level issue. The TypedDict introspection helpers
@@ -341,7 +355,11 @@ def validate_workflow(
             object whose ``meta`` carries the streaming contract field.
             When provided, enables streaming-contract enforcement on
             `type: tool` nodes whose tool name matches a registered
-            atomic skill.
+            atomic skill, and the skill-contract rules (SK1-SK4) on every
+            subgraph whose ``skill`` names a bundle in the registry --
+            read off ``meta.exit_conditions`` and ``canonical_scripts``
+            when the entry carries them (a ``gap.skills.SkillInfo`` does;
+            a bare streaming stub is left alone).
         tool_registry: Optional tool registry. Duck-typed: must support
             ``name in registry`` and ``registry.get(name)`` returning a
             descriptor whose ``schema`` attribute is a
@@ -369,6 +387,21 @@ def validate_workflow(
             )
             if sch is not None:
                 schemas[(sg_name, node_name)] = sch
+
+    # Skill contract (SK1-SK4). After the schemas: SK4 reads a local
+    # script's introspected outputs from them.
+    if skill_registry is not None:
+        for sg_name, sg in wf.subgraphs.items():
+            if not sg.skill or sg.skill not in skill_registry:
+                continue
+            try:
+                info = skill_registry.get(sg.skill)
+            except Exception:
+                continue
+            if info is not None:
+                issues.extend(_check_skill_contract(
+                    sg_name, sg, info, wf.workflow_dir, schemas,
+                ))
 
     # Cross-subgraph I/O
     issues.extend(_check_cross_subgraph_io(wf, schemas))
@@ -904,6 +937,211 @@ def _check_ref_ordering(sg_name: str, sg: SubgraphDef) -> list[ValidationIssue]:
 
 
 # ---------------------------------------------------------------------------
+# Skill contract (SK1-SK4)
+# ---------------------------------------------------------------------------
+
+
+def _check_skill_contract(
+    sg_name: str,
+    sg: SubgraphDef,
+    info: Any,
+    workflow_dir: Path,
+    schemas: dict[tuple[str, str], NodeSchema],
+) -> list[ValidationIssue]:
+    """SK1-SK4: a subgraph whose ``skill`` names a registered bundle keeps
+    the bundle's contract.
+
+    The codegen pipeline reconciles exits through ``agent_registry`` and
+    the executor omits it, so a hand-written or agent-composed graph that
+    labelled a subgraph with a bundle and wired it wrong validated clean
+    and failed on the node's first execution -- which a benchmark scores
+    as a policy that tried the task and lost. These rules run whenever a
+    skill registry is supplied and the label is a bundle in it; a
+    ``generic`` label is in no registry and gets nothing here.
+
+    SK1  With ``exit.router_field`` set, every ``exit.success_values``
+         entry is an exit the bundle's ``exit_conditions`` declares: the
+         values are what the terminal node returns under that field, so
+         an undeclared one is an outcome the bundle never produces
+         (error). With ``router_field`` null the success values are the
+         subgraph's own noop terminal nodes (S11) -- the graph's symbols,
+         like ``on_error`` -- and one outside the vocabulary is a warning:
+         a shipped graph routes ``read_scene``'s ``bad_start`` to its own
+         ``bad_start`` node while the bundle's SKILL.md declares three
+         exits, and a subgraph running only ``discover_regions`` has no
+         declared exit that names what it did. ``on_error`` outside the
+         declared set is a warning -- it is the graph's own symbol for a
+         raise, which the parent's mapping makes legal, but the declared
+         failure exits are the vocabulary the SKILL.md documents. Covering only
+         *some* declared exits is not an issue: a bundle with several
+         canonical scripts is split one script per subgraph, as its
+         SKILL.md recommends, and each subgraph covers that script's exits.
+         (The codegen rule is stricter both ways because there the
+         coordinator declared the exits it expects, per subgraph.)
+    SK2  When the bundle declares ``canonical_scripts``, at least one
+         ``type: script`` node names one, by file name; otherwise the
+         label claims a skill the subgraph does not run (error).
+    SK3  A node naming a canonical script binds every ``run()`` parameter
+         without a default and nothing ``run()`` does not accept (error):
+         the runtime calls ``run(ctx, **inputs)`` and either mismatch is a
+         TypeError on the node's first execution. The signature is read
+         from the file beside the graph when there is one -- a graph may
+         ship its own script under a canonical name, and that is what
+         runs -- and from the registry's import of the bundle's script
+         otherwise, so a graph that resolves the bundle's script at run
+         time is checked from its source directory. SKILL.md's
+         ``required_inputs`` is bundle-wide while a bundle's scripts have
+         different needs, so the named script's own signature is the
+         contract that binds.
+    SK4  A subgraph output bound to ``<node>.<field>`` on such a node
+         names a field the script's return TypedDict declares (error). A
+         return that is not a TypedDict declares nothing and is not
+         checked.
+    """
+    issues: list[ValidationIssue] = []
+    loc = f"subgraphs.{sg_name}"
+    skill = sg.skill
+    meta = getattr(info, "meta", None)
+    exit_conditions = getattr(meta, "exit_conditions", None) or {}
+    canonical = getattr(info, "canonical_scripts", None) or {}
+
+    # SK1
+    if exit_conditions:
+        declared = sorted(exit_conditions)
+        # Returned field-strings are the bundle's outcomes; terminal node
+        # names are the graph's own (S11), and drift there is a warning.
+        by_field = sg.exit.router_field is not None
+        for sv in sg.exit.success_values:
+            if sv not in exit_conditions:
+                issues.append(_issue(
+                    "error" if by_field else "warning",
+                    f"{loc}.exit.success_values",
+                    f"success value {sv!r} is not an exit skill {skill!r} "
+                    f"declares (exit_conditions: {declared})"
+                    + ("" if by_field else "; a terminal node named outside "
+                       "the bundle's vocabulary, which the parent's mapping "
+                       "must route")
+                    + " (SK1)",
+                ))
+        if sg.on_error is not None and sg.on_error not in exit_conditions:
+            issues.append(_issue(
+                "warning", f"{loc}.on_error",
+                f"on_error={sg.on_error!r} is not an exit skill {skill!r} "
+                f"declares (exit_conditions: {declared}); the parent's "
+                f"mapping must route it (SK1)",
+            ))
+
+    if not canonical:
+        return issues
+
+    # SK2: which script nodes run one of the bundle's canonical scripts.
+    by_file: dict[str, Any] = {}
+    for sinfo in canonical.values():
+        rel = getattr(sinfo, "bundle_relative", "") or str(getattr(sinfo, "path", ""))
+        if rel:
+            by_file[Path(rel).name] = sinfo
+    named: dict[str, Any] = {}
+    for node_name, node in sg.nodes.items():
+        if node.type == "script" and node.script:
+            sinfo = by_file.get(Path(node.script).name)
+            if sinfo is not None:
+                named[node_name] = sinfo
+    if not named:
+        issues.append(_issue(
+            "error", loc,
+            f"subgraph names skill {skill!r} but no script node runs one of "
+            f"its canonical scripts ({sorted(by_file)}) (SK2)",
+        ))
+        return issues
+
+    # SK3
+    for node_name, sinfo in named.items():
+        node = sg.nodes[node_name]
+        local = workflow_dir / (node.script or "")
+        module = None
+        if local.is_file():
+            try:
+                module = _import_script_for_validation(local, f"{sg_name}.{node_name}")
+            except Exception:
+                module = None  # already a warning from schema introspection
+        else:
+            module = getattr(sinfo, "module", None)
+        signature = _run_signature(module) if module is not None else None
+        if signature is None:
+            continue
+        required, accepted, var_kw = signature
+        bound = set(node.inputs)
+        missing = sorted(required - bound)
+        if missing:
+            issues.append(_issue(
+                "error", f"{loc}.nodes.{node_name}.inputs",
+                f"node runs {skill!r}'s canonical script "
+                f"{Path(node.script or '').name!r} but does not bind its "
+                f"required input(s) {missing} (run() requires "
+                f"{sorted(required)}) (SK3)",
+            ))
+        unknown = sorted(bound - accepted) if not var_kw else []
+        if unknown:
+            issues.append(_issue(
+                "error", f"{loc}.nodes.{node_name}.inputs",
+                f"node binds {unknown}, which {skill!r}'s canonical script "
+                f"{Path(node.script or '').name!r} does not accept (run() "
+                f"accepts {sorted(accepted)}) (SK3)",
+            ))
+
+    # SK4
+    for out_name, ref in sg.outputs.items():
+        parts = ref.parts()
+        if len(parts) < 2 or parts[0] not in named:
+            continue
+        head, field_name = parts[0], parts[1]
+        local = workflow_dir / (sg.nodes[head].script or "")
+        if local.is_file():
+            schema = schemas.get((sg_name, head))
+            returned = set(schema.outputs) if schema is not None else set()
+        else:
+            unit = getattr(named[head], "schema", None)
+            returned = set(getattr(unit, "outputs", None) or {})
+        if returned and field_name not in returned:
+            issues.append(_issue(
+                "error", f"{loc}.outputs.{out_name}",
+                f"output binding {ref.path!r} names {field_name!r}, which "
+                f"{skill!r}'s canonical script {local.name!r} does not "
+                f"return (returns {sorted(returned)}) (SK4)",
+            ))
+
+    return issues
+
+
+def _run_signature(module: Any) -> tuple[set[str], set[str], bool] | None:
+    """``(required, accepted, takes_var_kw)`` parameter names of a script
+    module's ``run()``, ``ctx`` excluded; ``None`` when there is no
+    inspectable ``run``."""
+    run_fn = getattr(module, "run", None)
+    if not callable(run_fn):
+        return None
+    try:
+        sig = inspect.signature(run_fn)
+    except (TypeError, ValueError):
+        return None
+    required: set[str] = set()
+    accepted: set[str] = set()
+    var_kw = False
+    for name, param in sig.parameters.items():
+        if name == "ctx":
+            continue
+        if param.kind is param.VAR_KEYWORD:
+            var_kw = True
+            continue
+        if param.kind is param.VAR_POSITIONAL:
+            continue
+        accepted.add(name)
+        if param.default is param.empty:
+            required.add(name)
+    return required, accepted, var_kw
+
+
+# ---------------------------------------------------------------------------
 # Cross-subgraph I/O (W8)
 # ---------------------------------------------------------------------------
 
@@ -939,33 +1177,81 @@ def _check_cross_subgraph_io(
                 reachable_sgs.add(node.ref)
             stack.append(nxt)
 
-    # Producers: subgraphs that declare an output of a given name.
-    producers: dict[str, list[str]] = {}
-    for sg_name in reachable_sgs:
-        sg = wf.subgraphs.get(sg_name)
-        if sg is None:
-            continue
-        for out_name in sg.outputs:
-            producers.setdefault(out_name, []).append(sg_name)
+    # Producers, per top-level SITE. The executor binds a subgraph's inputs
+    # from the outputs of subgraphs that have already RUN (plus whatever the
+    # calling node passes), so "some reachable subgraph declares this name"
+    # is not the question -- "a subgraph that always runs before this call
+    # site declares it" is. Checking the weaker question passed two shapes
+    # that abort at runtime before any node: a subgraph that produces its own
+    # input, and a producer that sits later on the path or on a sibling
+    # branch. Both cost whole self-learning runs, because the abort happens
+    # before the first node and reads downstream as "the graph did nothing".
+    node_of: dict[str, list[str]] = {}
+    for node_name in seen:
+        node = wf.nodes.get(node_name)
+        if node is not None and node.type == "subgraph" and node.ref:
+            node_of.setdefault(node.ref, []).append(node_name)
 
-    # Consumers: each reachable subgraph's declared inputs must have a producer.
-    for sg_name in reachable_sgs:
+    # Reverse edges over the top level, for the ancestor walk.
+    rev: dict[str, set[str]] = {}
+    for src, dsts in out.items():
+        for dst in dsts:
+            rev.setdefault(dst, set()).add(src)
+
+    def _ancestors(target: str) -> set[str]:
+        """Every node that can precede *target* on some path from START."""
+        seen_anc: set[str] = set()
+        stack = [target]
+        while stack:
+            for parent in rev.get(stack.pop(), ()):
+                if parent not in seen_anc:
+                    seen_anc.add(parent)
+                    stack.append(parent)
+        seen_anc.discard(target)
+        return seen_anc
+
+    ancestors_cache: dict[str, set[str]] = {}
+
+    def _anc(node_name: str) -> set[str]:
+        if node_name not in ancestors_cache:
+            ancestors_cache[node_name] = _ancestors(node_name)
+        return ancestors_cache[node_name]
+
+    for sg_name in sorted(reachable_sgs):
         sg = wf.subgraphs.get(sg_name)
         if sg is None:
             continue
-        for in_name, in_type in sg.inputs.items():
-            if (
-                in_name == OBSERVATION_STREAM_INPUT_NAME
-                and in_type.endswith(_OBSERVATION_STREAM_TYPE_NAME)
-            ):
-                continue
-            if in_name not in producers:
+        for site in sorted(node_of.get(sg_name, [])):
+            site_node = wf.nodes.get(site)
+            passed = set(site_node.inputs) if site_node is not None else set()
+            before = _anc(site)
+            upstream: set[str] = set()
+            for other in before:
+                other_node = wf.nodes.get(other)
+                if other_node is None or other_node.type != "subgraph":
+                    continue
+                producer = wf.subgraphs.get(other_node.ref or "")
+                if producer is not None and other_node.ref != sg_name:
+                    upstream.update(producer.outputs)
+            for in_name, in_type in sg.inputs.items():
+                if (
+                    in_name == OBSERVATION_STREAM_INPUT_NAME
+                    and in_type.endswith(_OBSERVATION_STREAM_TYPE_NAME)
+                ):
+                    continue
+                if in_name in passed or in_name in upstream:
+                    continue
                 issues.append(_issue(
                     "error",
                     f"subgraphs.{sg_name}.inputs.{in_name}",
-                    f"input {in_name!r} (type {in_type!r}) has no upstream "
-                    f"producer subgraph that declares an output named "
-                    f"{in_name!r} (W8)",
+                    f"input {in_name!r} (type {in_type!r}) is unbound at call "
+                    f"site {site!r}: no subgraph that runs before it declares "
+                    f"an output named {in_name!r}, and the node passes no "
+                    f"value for it. Either produce it upstream (a subgraph's "
+                    f"own outputs do not bind its own inputs) or pass it at "
+                    f"the call site: "
+                    f'"{site}": {{"type": "subgraph", "ref": "{sg_name}", '
+                    f'"inputs": {{"{in_name}": ...}}}} (W8)',
                 ))
 
     return issues

@@ -6,7 +6,7 @@
 from typing import TypedDict
 
 import pytest
-from gap_core.errors import GuardLimitExceeded, TaskCancelled
+from gap_core.errors import GuardLimitExceeded, TaskCancelled, ToolArgumentError
 from gap_core.tools import ToolRegistry, guards
 
 from gap.runtime.context import CancelToken, NodeContext
@@ -78,11 +78,15 @@ def test_tool_dispatch_records_subcall():
     assert [c[1] for c in trace.subcalls] == [0, 1]
 
 
-def test_tool_dispatch_injects_ctx_and_filters_kwargs():
+def test_tool_dispatch_injects_ctx_and_refuses_unknown_kwargs():
     ctx = NodeContext(_registry())
-    out = ctx.tool("seg.segment", image="img", extraneous="dropped")
+    out = ctx.tool("seg.segment", image="img")
     assert out["mask"] == [0]
     assert out["ctx"] is ctx
+    # A script naming a parameter the tool does not have is refused where it
+    # is written, rather than silently running on the tool's defaults.
+    with pytest.raises(ToolArgumentError, match="extraneous"):
+        ctx.tool("seg.segment", image="img", extraneous="dropped")
 
 
 def test_tool_dispatch_without_trace_is_silent():

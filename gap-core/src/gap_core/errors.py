@@ -35,6 +35,33 @@ class VerificationFailed(PipelineError):
     """Post-execution verification (checkpoint) failed."""
 
 
+def is_terminal(exc: BaseException) -> bool:
+    """Whether an exception means the world is gone, not that a step failed.
+
+    A subgraph's ``on_error`` exit is for a policy that tried something and it
+    did not work: the graph routes, recovers, and often loops back to try
+    again. That is exactly the wrong response to "the episode is over" -- the
+    retry calls another tool, which raises the same thing, which routes again.
+    One study episode spun that way **9,186 times** before the super-step cap
+    stopped it, filling the run's only diagnostic record with a message that
+    described the teardown rather than the failure.
+
+    Any exception whose type sets ``terminal = True`` is re-raised instead of
+    routed, and the cause chain is walked because the runtime wraps a tool's
+    exception in :class:`NodeExecutionError` before a subgraph ever sees it.
+    A duck-typed attribute rather than a shared base class, so a simulator can
+    mark its own "the episode ended" error without depending on gap.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if getattr(type(current), "terminal", False):
+            return True
+        seen.add(id(current))
+        current = getattr(current, "cause", None) or current.__cause__
+    return False
+
+
 class ToolError(PipelineError):
     """A tool call failed (connector tool or tool-bundle function)."""
 
@@ -42,6 +69,17 @@ class ToolError(PipelineError):
         self.tool = tool
         self.detail = detail
         super().__init__(f"{tool}: {detail}")
+
+
+class ToolArgumentError(ToolError):
+    """A tool was called with a parameter it does not declare.
+
+    Its own error rather than a filtered-away no-op: an argument the tool
+    never accepts means the caller believes something false about the
+    contract, and dropping it returns the *default* result under an ok
+    status. The mistake then surfaces far downstream as behaviour — a grasp
+    that closes on the wrong axis — instead of at the call that caused it.
+    """
 
 
 class WorkflowValidationError(PipelineError):

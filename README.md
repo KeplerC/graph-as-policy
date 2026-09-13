@@ -28,13 +28,6 @@ packing into tagged bins, and USB-C insertion (UR5 with force feedback).</sub>
 
 </div>
 
-> [!IMPORTANT]
-> **🧪 GaP Beta Code release (1 July 2026).** GaP is under active development
-> and now in beta testing. Please send comments and suggestions to
-> <kych@berkeley.edu> — we plan to release an updated version by **1 Aug 2026**.
-> Expect rough edges: APIs, the workflow schema, and skill interfaces may change
-> without notice between releases.
-
 ```python
 import gap
 

@@ -289,6 +289,28 @@ def test_shadowed_bundle_is_inert_and_never_imported(monkeypatch, tmp_path):
     assert shadowed.deps.ok
 
 
+def test_connector_requirement_is_reported_not_blocking(tmp_path: Path):
+    """A skill that needs a richer connector's tool says so under
+    ``requires.connector``; the rollup records the need and stays ready,
+    because a connector cannot be probed statically."""
+    write_bundle(
+        tmp_path, "needs-planner", kind="skill", tools_py=None,
+        gap_block=(
+            "  allowed_tools: [robot.get_observation, motion.plan_joint]\n"
+            "  requires: {connector: [motion.plan_joint]}\n"
+        ),
+    )
+    report = build_check_report(resolve_registries([tmp_path]))
+    skill = report.skills[0]
+    assert skill.name == "needs-planner"
+    assert skill.unknown_tools == []
+    assert skill.connector_required == ["motion.plan_joint"]
+    assert skill.tools["motion.plan_joint"] == "connector"
+    assert skill.status == "ready"
+    assert skill.to_json_dict()["connector_required"] == ["motion.plan_joint"]
+
+
+
 def test_json_schema_shape(monkeypatch, tmp_path):
     reg = tmp_path / "reg"
     write_bundle(reg, "rgt-cap-json")

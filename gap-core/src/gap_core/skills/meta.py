@@ -69,11 +69,12 @@ class SkillRequires:
 
     The atomic capability question is "can this bundle run *here*?" —
     deps importable (probed automatically), plus whatever this block
-    declares. Keep it small: four keys, all optional. Authored in
+    declares. Keep it small: five keys, all optional. Authored in
     SKILL.md frontmatter under ``gap.requires``::
 
         gap:
-          requires: {gpu: true, env: [MY_API_KEY], env_any: [], weights: true}
+          requires: {gpu: true, env: [MY_API_KEY], env_any: [], weights: true,
+                     connector: [motion.plan_joint]}
     """
 
     gpu: bool = False
@@ -90,6 +91,15 @@ class SkillRequires:
     cache state via the bundle's optional ``weights_cached() -> bool | None``
     hook (filesystem checks only — never downloads); without the hook the
     state is reported as unknown."""
+
+    connector: list[str] = field(default_factory=list)
+    """Flat tool names a run-time connector must register for this bundle's
+    scripts — beyond the ``robot.*``/``sim.*`` every gap connector ships and
+    beyond any bundle's ``gap.tools`` (e.g. ``motion.plan_joint``, a planner
+    a richer connector registers in process). ``gap skills check`` counts
+    them as resolvable in ``allowed_tools``; ``gap check`` cannot probe a
+    connector statically and reports them as "needs a connector providing
+    …", never as a block."""
 
 
 @dataclass

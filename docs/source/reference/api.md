@@ -681,6 +681,12 @@ half-extents** along the box's local axes — not full sizes.
 | `CollisionMesh` | `{name, vertices, faces, pose}` |
 | `WorldConfig` | `{meshes: list[CollisionMesh]}` |
 | `GraspCandidates` | `{poses: list[Se3Pose] (best-first), scores?}` |
+| `FunctionalFeature` | `{kind, pose: Se3Pose, axis: Vec3, description?, confidence?, fit_quality?, radius_inner?, radius_outer?, length?, usable_length?, insertion_depth?, seating_margin?, local_center?}` — a loop, shaft, tip, aperture, surface or region with the metric geometry a mate needs |
+| `CollisionSphere` | `{center: [x, y, z], radius}` meters, in `AttachedObject.frame` |
+| `AttachedObject` | `{frame, spheres: list[CollisionSphere], sphere_fit_type?, sphere_radius_shrink_m?}` — a held object's collision model in the TCP frame |
+| `PoseWaypoint` | `{pose: Se3Pose, mode?, cartesian?, allow_goal_contact?, allow_start_contact?}` |
+| `PoseSequence` | `{waypoints: list[PoseWaypoint], time_scale?, world_config?, attached_object?}` — an ordered TCP plan with what it was solved against |
+| `Centerline` | `{points: [[x, y, z], ...], arclength_m, radius_m, nodes, ordered, visibility?, tracked?}` — an ordered centreline of a deformable linear object |
 
 `ArmState` semantics: `gripper_fraction` runs **0.0 closed → 1.0 open**
 (note the opposite anchor from `GripperState.position`, which is a width in

@@ -7,6 +7,8 @@ No real ray (and no cluster) anywhere in this suite — the stub mimics
 from __future__ import annotations
 
 import pytest
+
+from gap_core.errors import ToolArgumentError
 from gap_core.tools import ToolRegistry
 from gap_core.tools.ray_executor import (
     RayToolExecutor,
@@ -204,13 +206,18 @@ def test_substitute_respects_bundle_filter() -> None:
     assert ray.remote_calls == 1
 
 
-def test_substitute_preserves_kwarg_filtering() -> None:
-    """The registry filters kwargs by the ORIGINAL signature, so extra
-    workflow inputs don't break the ray proxy."""
+def test_substitute_checks_against_the_original_signature() -> None:
+    """The proxy is judged by the ORIGINAL signature, not the proxy's own.
+
+    Swapping in a ray proxy must not change which arguments a tool accepts:
+    a declared one still dispatches, and an undeclared one is still refused
+    rather than dropped on the way to the actor.
+    """
     reg = _make_registry()
     substitute_ray_tools(reg, ray_module=StubRay())
-    out = reg.invoke("sam3.segment", image="img", bogus_extra=123)
-    assert out == {"mask": "img:object"}
+    assert reg.invoke("sam3.segment", image="img") == {"mask": "img:object"}
+    with pytest.raises(ToolArgumentError, match="bogus_extra"):
+        reg.invoke("sam3.segment", image="img", bogus_extra=123)
 
 
 def test_shared_executor_across_registries() -> None:

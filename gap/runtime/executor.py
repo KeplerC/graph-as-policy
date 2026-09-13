@@ -31,9 +31,11 @@ from typing import Any
 
 from gap_core.errors import (
     GraphValidationError,
+    NodeExecutionError,
     PipelineError,
     TaskCancelled,
     VerificationFailed,
+    is_terminal,
 )
 from gap_core.tools import guards
 
@@ -59,6 +61,29 @@ from .workflow import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _typed_error_text(exc: BaseException) -> str:
+    """``TypeName: message``, because the message alone is often not enough.
+
+    A bare ``KeyError`` stringifies to ``'z'`` and a ``PipelineError`` raised
+    by a policy's own check stringifies to the sentence its author wrote. Only
+    the type separates "my code indexed a field that is not there" from "my
+    check fired" -- and that is the first thing a reader has to decide.
+    """
+    message = str(exc)
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+
+
+def _node_error_text(exc: BaseException) -> str:
+    """The sentence a reader needs: which node, what kind, and what it said.
+
+    ``NodeExecutionError`` carries the node id but renders its cause with
+    ``str()``, which drops the cause's type. Rebuild it so the type survives.
+    """
+    if isinstance(exc, NodeExecutionError):
+        return f"Node {exc.node_id!r} failed: {_typed_error_text(exc.cause)}"
+    return _typed_error_text(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +273,10 @@ class WorkflowExecutor:
         # ("success" | "failure"), or None if it never reached one.
         self.exit_status: str | None = None
 
+        # First node error of the current execute(), kept so the terminal
+        # failure can name a cause instead of only an end-node label.
+        self._first_node_error: str | None = None
+
         self._stream_grace_s = float(
             os.environ.get("GAP_PARALLEL_CANCEL_GRACE_S", "2.0"),
         )
@@ -261,6 +290,7 @@ class WorkflowExecutor:
         guards.reset_counters()
         self.checkpoint_results = []
         self.exit_status = None
+        self._first_node_error = None
 
         issues = validate_workflow(
             self.workflow,
@@ -278,11 +308,29 @@ class WorkflowExecutor:
         self._initialize_trace_graph()
         self.trace.copy_workflow(self.workflow_dir)
 
-        # The observation stream starts only when the constructor was
-        # given a poll fn (the connector's ``get_observation``). Workflow
-        # meta override beats env var; fall back to the constructor's hz.
+        # The observation stream starts only when the constructor was given a
+        # poll fn (the connector's ``get_observation``) **and the workflow
+        # actually reads one**. Almost every connector has a ``get_observation``,
+        # so the poll fn alone started a background poller for every graph --
+        # including the great majority that never bind the stream.
+        #
+        # On a single world that is a wasted picture now and then. On a wave it
+        # is the whole clock: the poller asks for an observation, the fleet
+        # answers it with a render of every world and every camera, and because
+        # the fleet steps only when every world is parked, that render lands
+        # between every pair of steps. Profiled on a twelve-world surface_prep
+        # wave: 78% of the wall (3069 s of 3920 s) was the barrier held with the
+        # fleet thread inside `render_worlds`, 119 of 119 samples, two thirds of
+        # those in the device-to-host copy -- for a graph whose text contains no
+        # reference to `observation_stream` at all. Measured: render 340 ms
+        # against a 36 ms step, and a state-only observation costs 0.00 ms.
+        #
+        # It also flattened the point of batching: per-episode cost was 31/27/31
+        # ms at 4/6/12 worlds with the render, and 6.6/4.0/3.0 without it.
+        #
+        # Workflow meta override beats env var; fall back to the constructor's hz.
         # Visual-servo loops bump this to match the servo update_hz.
-        if self.observation_poll_fn is not None:
+        if self.observation_poll_fn is not None and self._reads_observation_stream():
             hz_str = (
                 self.workflow.meta.get("observation_stream_hz")
                 or os.environ.get("GAP_OBSERVATION_STREAM_HZ", "")
@@ -297,6 +345,18 @@ class WorkflowExecutor:
 
         try:
             self._run_top_level()
+        except Exception:
+            # A failure before the first node completes would otherwise leave
+            # no dag_trace.json at all -- and a reader with no trace cannot
+            # tell "the graph aborted at load" from "the graph ran and did
+            # nothing", which is exactly the confusion that cost a
+            # self-learning run five iterations. The trace already holds the
+            # error event; write it out before the exception leaves.
+            try:
+                self.trace.flush()
+            except Exception:  # noqa: BLE001 - never mask the original failure
+                logger.debug("could not flush the trace after a failure", exc_info=True)
+            raise
         finally:
             if self.observation_stream is not None:
                 self.observation_stream.stop()
@@ -352,8 +412,12 @@ class WorkflowExecutor:
         if node.status == "success":
             logger.info("Workflow terminated at end node %r (success)", terminal)
             return
+        detail = (
+            f"; first node error -- {self._first_node_error}"
+            if self._first_node_error else ""
+        )
         raise PipelineError(
-            f"workflow terminated at end node {terminal!r} (failure)"
+            f"workflow terminated at end node {terminal!r} (failure){detail}"
         )
 
     # ------------------------------------------------------------------
@@ -616,6 +680,7 @@ class WorkflowExecutor:
 
         self.trace.start_node(full_id)
         success = False
+        error_text: str | None = None
         try:
             resolved = resolve_inputs(node.inputs, scope.local_outputs)
             self.trace.record_resolved_inputs(full_id, resolved)
@@ -643,8 +708,22 @@ class WorkflowExecutor:
                 )
             success = True
             return result
+        except Exception as exc:
+            # The message is the only record of *why* a node failed, and a
+            # failure is routed, not propagated: `_run_subgraph` catches this
+            # and takes the `on_error` exit. Without recording it here the
+            # reason survives only in the log stream, so every consumer of
+            # dag_trace.json -- the visualizer, and any feedback loop reading
+            # the trace -- sees `status: error, error_message: null` and has
+            # to guess. Record, then let it propagate unchanged.
+            error_text = _node_error_text(exc)
+            raise
         finally:
             self.trace.end_node(full_id, success)
+            if error_text is not None:
+                self.trace.record_error(full_id, error_text)
+                if self._first_node_error is None:
+                    self._first_node_error = f"{full_id}: {error_text}"
             # Incremental flush: a crash mid-run (segfault, OOM kill, disk
             # full during video render) previously lost the WHOLE trace —
             # node_data/ was on disk but dag_trace.json never existed, so
@@ -681,7 +760,17 @@ class WorkflowExecutor:
             )
 
         logger.info("--- Subgraph '%s' ---", sg_name)
-        bound_inputs = self._bind_subgraph_inputs(sg_name, sg)
+        try:
+            bound_inputs = self._bind_subgraph_inputs(
+                sg_name, sg, node, parent_scope,
+            )
+        except PipelineError as exc:
+            # Blame the node, not the workflow: a binding failure is the one
+            # error that happens before any node runs, so without this the
+            # trace names nothing and the failure reads as "the graph ran and
+            # did nothing".
+            self.trace.record_error(node_name, str(exc))
+            raise
 
         scope = _ScopeState()
         scope.local_outputs[RESERVED_INPUT_PSEUDOSTATE] = bound_inputs
@@ -698,7 +787,11 @@ class WorkflowExecutor:
                 scope_name=sg_name,
             )
         except Exception as exc:
-            if sg.on_error is None:
+            if sg.on_error is None or is_terminal(exc):
+                # Terminal means the world this graph acts on is gone -- the
+                # episode ended under it. Routing would send the graph around
+                # its recovery edge to call another tool that raises the same
+                # thing, forever. See `gap_core.errors.is_terminal`.
                 raise
             logger.warning(
                 "subgraph %r raised %s; routing to on_error=%r",
@@ -851,19 +944,104 @@ class WorkflowExecutor:
         )
 
     def _bind_subgraph_inputs(
-        self, sg_name: str, sg: SubgraphDef,
+        self,
+        sg_name: str,
+        sg: SubgraphDef,
+        node: NodeDef | None = None,
+        scope: _ScopeState | None = None,
     ) -> dict[str, Any]:
-        """Bind a subgraph's declared inputs from upstream cross-subgraph outputs."""
+        """Bind a subgraph's declared inputs at one call site.
+
+        Three sources, in precedence order, because a subgraph is a callee
+        and its caller is entitled to say what it is called with:
+
+        1. **The calling node's own ``inputs``** -- a literal, or a ``$ref``
+           into the caller's scope. WORKFLOW_FORMAT tells authors "literals
+           are passed as plain JSON", and script nodes have always honoured
+           them; a subgraph node ignoring them was the difference between a
+           graph the validator accepts and a graph that raises before its
+           first node. Measured: a workflow whose entry subgraph declared
+           ``arm_id`` and was called with ``{"inputs": {"arm_id": 0}}``
+           aborted in 60 of 60 episodes across five self-learning
+           iterations, and every episode was reported to the improver as a
+           near miss.
+        2. The latest cross-subgraph output of the same name.
+        3. The facade's ``initial_inputs``.
+
+        A name none of the three answers is still an error: a subgraph
+        cannot run without a declared input, and failing here names the
+        input, where failing later names whatever the script did with
+        ``None``.
+
+        Each call-site input is resolved **on its own**, and one that cannot
+        be resolved falls through to the next source rather than failing the
+        call. Before these inputs were honoured at all they were ignored
+        wholesale, so a graph carrying a stale ``$ref`` beside inputs its
+        upstream subgraphs already produce ran perfectly well; resolving the
+        dict as a unit turned every such graph into a load-time abort. The
+        shipped expert tool-hanging graph is one: its realign node passes
+        ``$ref realign.held_object_in_tcp``, no node produces that field, and
+        the six of eight episodes it used to hang became zero.
+        """
+        site: dict[str, Any] = {}
+        unresolved: dict[str, str] = {}
+        if node is not None and node.inputs:
+            local = scope.local_outputs if scope is not None else {}
+            for in_name, spec in node.inputs.items():
+                if in_name not in sg.inputs:
+                    continue
+                try:
+                    site[in_name] = resolve_inputs({in_name: spec}, local)[in_name]
+                except Exception as exc:  # noqa: BLE001 - recorded, then the next source is tried
+                    unresolved[in_name] = str(exc)
         bound: dict[str, Any] = {}
         for in_name in sg.inputs:
-            value = self._lookup_cross_subgraph_output(in_name)
+            value = site.get(in_name)
             if value is None:
+                value = self._lookup_cross_subgraph_output(in_name)
+            if value is None:
+                detail = (
+                    f"; the calling node passes one but it does not resolve ({unresolved[in_name]})"
+                    if in_name in unresolved
+                    else " and the calling node passes no value for it"
+                )
                 raise PipelineError(
-                    f"subgraph {sg_name!r} input {in_name!r} has no upstream "
-                    f"producer"
+                    f"subgraph {sg_name!r} input {in_name!r} has no upstream producer{detail}"
                 )
             bound[in_name] = value
         return bound
+
+    def _reads_observation_stream(self) -> bool:
+        """Whether any node in this workflow binds the observation stream.
+
+        A node reads it by naming :data:`OBSERVATION_STREAM_INPUT_NAME` among
+        its inputs, or a subgraph by declaring it as one of its own -- both are
+        checked, because a subgraph's binding is what its nodes then resolve
+        against. Streaming nodes are included: a ``streaming`` node is exactly
+        the kind that wants a live feed.
+
+        Conservative by construction: anything that mentions the name at all
+        keeps the poller. The cost of a false positive is the status quo; the
+        cost of a false negative is a graph that silently reads a stream nobody
+        is filling, so the check errs toward starting it.
+        """
+        name = OBSERVATION_STREAM_INPUT_NAME
+        if name in (self.initial_inputs or {}):
+            return True
+        for node in self.workflow.nodes.values():
+            if name in (getattr(node, "inputs", None) or {}):
+                return True
+            if getattr(node, "streaming", False):
+                return True
+        for sg in self.workflow.subgraphs.values():
+            if name in (getattr(sg, "inputs", None) or {}):
+                return True
+            for node in sg.nodes.values():
+                if name in (getattr(node, "inputs", None) or {}):
+                    return True
+                if getattr(node, "streaming", False):
+                    return True
+        return False
 
     def _lookup_cross_subgraph_output(self, name: str) -> Any | None:
         if name == OBSERVATION_STREAM_INPUT_NAME and self.observation_stream is not None:

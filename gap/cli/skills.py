@@ -481,7 +481,7 @@ compatibility: requires gap>=0.1
 metadata: {{category: TODO, tags: []}}
 gap:
   # Operational requirements consumed by `gap check` — uncomment what applies:
-  # requires: {{gpu: true, env: [MY_API_KEY], env_any: [], weights: true}}
+  # requires: {{gpu: true, env: [MY_API_KEY], env_any: [], weights: true, connector: [motion.plan_joint]}}
   tools:
     - {name}.run: TODO summary of the tool function.
 ---
@@ -533,7 +533,7 @@ compatibility: requires gap>=0.1
 metadata: {{category: TODO, tags: []}}
 gap:
   # Operational requirements consumed by `gap check` — uncomment what applies:
-  # requires: {{gpu: true, env: [MY_API_KEY], env_any: [], weights: true}}
+  # requires: {{gpu: true, env: [MY_API_KEY], env_any: [], weights: true, connector: [motion.plan_joint]}}
   allowed_tools: []
   exit_conditions:
     done: TODO meaning of success.

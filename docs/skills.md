@@ -120,7 +120,7 @@ under `gap:` is rejected.
 | `hard_rules` | prompt assembler | inline rules or anchored refs into the bundle's own `references/` (e.g. `perception_pipeline_invariants.md#emit-both-obb-and-mask`) |
 | `streaming` | validator (rule S4) | `true` iff the bundle's callable streams via `ctx.publish`; checked against `streaming: true` nodes |
 | `tools` | catalog docs | **tool bundles**: list of `- name: one-line summary` for each `@tool` in `tools.py` (documentation; authoritative schemas come from the registry) |
-| `requires` | `gap check` | operational requirements: `{gpu: true, env: [VARS…], env_any: [A, B], weights: true}` (all keys optional; unknown keys rejected). `requires: {}` = explicitly nothing. `gap check` derives per-bundle readiness — and per-skill runnability — from this. Mandatory for tool bundles in the canonical registry (test-enforced) |
+| `requires` | `gap check`, `gap skills check` | operational requirements: `{gpu: true, env: [VARS…], env_any: [A, B], weights: true, connector: [motion.plan_joint, …]}` (all keys optional; unknown keys rejected). `requires: {}` = explicitly nothing. `gap check` derives per-bundle readiness — and per-skill runnability — from this. `connector` lists flat tool names a richer run-time connector registers (beyond the generic `robot.*`/`sim.*` and beyond any bundle's `gap.tools`): they count as resolvable in `allowed_tools`, and `gap check` reports the skill as READY "— needs a connector providing …" rather than blocking on what it cannot probe. Mandatory for tool bundles in the canonical registry (test-enforced) |
 
 `params`/`outputs` are **not** frontmatter — they come from Python
 introspection of the bundle's callables and scripts.

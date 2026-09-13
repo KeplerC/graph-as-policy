@@ -17,7 +17,9 @@ Per bundle, :func:`validate_bundle_meta` checks:
   ``prompts``, ``references``, ``examples``);
 - ``gap.allowed_tools`` resolve against the known tool names — the
   connector surface (``robot.*`` / ``sim.*``) plus every tool declared by
-  any bundle in the checkout;
+  any bundle in the checkout, plus whatever the bundle itself declares
+  under ``gap.requires.connector`` (tools a richer run-time connector
+  registers, which the checker cannot see);
 - ``produces_outputs`` / ``required_inputs`` type names resolve in
   :data:`gap.schema.TYPE_REGISTRY`;
 - the checkout's ``pyproject.toml`` has a pip extra named after the
@@ -249,14 +251,37 @@ def validate_bundle_meta(
             error(f"examples entry {ex.path!r} is missing")
 
     # --- allowed_tools resolve ----------------------------------------------
+    declared_connector = list(meta.requires.connector) if meta.requires is not None else []
     if known_tools is not None and meta.allowed_tools:
-        unknown = sorted(set(meta.allowed_tools) - set(known_tools))
+        resolvable = set(known_tools) | set(declared_connector)
+        unknown = sorted(set(meta.allowed_tools) - resolvable)
         if unknown:
             error(
                 f"allowed_tools reference unknown tools {unknown} (known: "
                 f"connector robot.*/sim.* tools plus every bundle's declared "
-                f"gap.tools)"
+                f"gap.tools, plus this bundle's gap.requires.connector)"
             )
+    if known_tools is not None and declared_connector:
+        # A connector requirement is for what no bundle and no generic
+        # connector supplies; naming something they do is a stale line.
+        from .capability import CONNECTOR_PREFIXES
+
+        generic = {
+            name for name in known_tools
+            if name.split(".", 1)[0] in CONNECTOR_PREFIXES
+        }
+        bundled = set(known_tools) - generic
+        for entry in declared_connector:
+            if entry in bundled:
+                warning(
+                    f"requires.connector names {entry!r}, which a bundle in this "
+                    f"checkout already declares under gap.tools — drop it"
+                )
+            elif entry in generic:
+                warning(
+                    f"requires.connector names {entry!r}, which every gap "
+                    f"connector already provides — drop it"
+                )
 
     # --- declared I/O type names resolve ------------------------------------
     from gap_core.schema import TYPE_REGISTRY

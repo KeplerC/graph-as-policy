@@ -38,6 +38,13 @@ TYPE_REGISTRY: dict[str, Any] = {
     "CollisionMesh": _t.CollisionMesh,
     "WorldConfig": _t.WorldConfig,
     "GraspCandidates": _t.GraspCandidates,
+    # Features, payloads, plans, curves
+    "FunctionalFeature": _t.FunctionalFeature,
+    "CollisionSphere": _t.CollisionSphere,
+    "AttachedObject": _t.AttachedObject,
+    "PoseWaypoint": _t.PoseWaypoint,
+    "PoseSequence": _t.PoseSequence,
+    "Centerline": _t.Centerline,
     # Scalars usable in declarations
     "str": str,
     "string": str,

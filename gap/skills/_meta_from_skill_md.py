@@ -196,7 +196,9 @@ def _reject_misplaced_keys(data: dict, bundle_dir: Path) -> None:
         )
 
 
-_REQUIRES_KEYS = frozenset({"gpu", "env", "env_any", "weights"})
+_REQUIRES_KEYS = frozenset({"gpu", "env", "env_any", "weights", "connector"})
+
+_TOOL_NAME = re.compile(r"[a-z0-9][a-z0-9_-]*\.[a-z0-9_]+")
 
 
 def _requires(v: Any) -> SkillRequires:
@@ -225,11 +227,19 @@ def _requires(v: Any) -> SkillRequires:
                     f"gap.requires.{label} entries must be non-empty "
                     f"environment variable names"
                 )
+    connector = _str_list(v.get("connector"))
+    for entry in connector:
+        if not _TOOL_NAME.fullmatch(entry.strip()):
+            raise ValueError(
+                f"gap.requires.connector entries must be flat tool names of the "
+                f"form <prefix>.<name> (e.g. motion.plan_joint), got {entry!r}"
+            )
     return SkillRequires(
         gpu=bool(v.get("gpu", False)),
         env=env,
         env_any=env_any,
         weights=bool(v.get("weights", False)),
+        connector=[entry.strip() for entry in connector],
     )
 
 

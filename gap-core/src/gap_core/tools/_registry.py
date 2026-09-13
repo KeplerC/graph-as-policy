@@ -13,6 +13,7 @@ mechanics — it sees a flat catalog of typed tools.
 
 from __future__ import annotations
 
+import difflib
 import importlib.util
 import inspect
 import logging
@@ -22,9 +23,27 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from gap_core.errors import ToolArgumentError
 from gap_core.tools.schema import UnitSchema, extract_schema
 
 logger = logging.getLogger(__name__)
+
+
+def _with_suggestions(unknown: list[str], accepted: set[str]) -> str:
+    """``'arm' (did you mean 'arm_id'?)`` -- name the fix, not just the fault.
+
+    Most contract mistakes are near misses of a real parameter, because the
+    surface is not uniform: ``motion.plan_linear`` takes ``end`` while
+    ``motion.plan_joint`` takes ``pose``, and ``sim.check_grasp`` takes ``arm``
+    while everything else takes ``arm_id``. A caller regularizing one to the
+    other is reasoning correctly about an irregular surface, and the error is
+    the only place that can say so.
+    """
+    parts = []
+    for u in unknown:
+        close = difflib.get_close_matches(u, sorted(accepted), n=1, cutoff=0.6)
+        parts.append(f"{u!r} (did you mean {close[0]!r}?)" if close else repr(u))
+    return ", ".join(parts)
 
 ToolScope = Literal["runtime", "codegen"]
 ToolTransport = Literal["python", "rpc"]
@@ -143,15 +162,68 @@ class PythonAdapter:
         self._requires_ctx[name] = requires_ctx
 
     def invoke(self, name: str, ctx: Any | None, **kwargs: Any) -> Any:
+        """Call a registered tool, refusing arguments it does not declare.
+
+        This used to filter unknown keys out and call anyway. That is the
+        worst available behaviour for a code-writing caller: a policy that
+        asked ``robot.grasp_frame(yaw=-0.105)`` when the parameter is
+        ``close_heading_deg`` got the *default* frame back with a status of
+        ok, and every downstream symptom pointed somewhere else. An argument
+        the tool never declared is a contract error at the call site; say so
+        there, with the accepted names, rather than silently substituting a
+        default and letting the mistake surface as physics.
+        """
         fn = self._callables.get(name)
         if fn is None:
             raise KeyError(f"Python tool {name!r} not registered with this adapter")
         sig = inspect.signature(fn)
-        accepted = set(sig.parameters.keys()) - {"ctx"}
-        filtered = {k: v for k, v in kwargs.items() if k in accepted}
+        parameters = sig.parameters
+        # The ctx-injected parameter is passed positionally and is not always
+        # spelled "ctx" -- `register_callable(..., requires_ctx=True)` takes
+        # whatever the first parameter is called. Identify it by position, or
+        # nothing named `conn` reads as a caller-supplied argument.
+        injected = (
+            next(iter(parameters), None) if self._requires_ctx.get(name)
+            else ("ctx" if "ctx" in parameters else None)
+        )
+        # A tool that declares **kwargs has opted into arbitrary keys.
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+            accepted_kwargs = dict(kwargs)
+        else:
+            accepted = set(parameters) - ({injected} if injected else set())
+            unknown = sorted(set(kwargs) - accepted)
+            if unknown:
+                raise ToolArgumentError(
+                    name,
+                    f"does not accept {_with_suggestions(unknown, accepted)}; "
+                    f"its parameters are {', '.join(sorted(accepted)) or '(none)'}",
+                )
+            # A missing required argument reaches the caller as a TypeError
+            # naming the bound *method* -- "SimTools.check_grasp() missing 1
+            # required positional argument: 'object_name'" -- which names a
+            # class the policy author has never seen and cannot look up. Raise
+            # the same error the unknown-argument case raises, in terms of the
+            # tool, so both halves of the same mistake read alike.
+            missing = [
+                pname for pname, param in parameters.items()
+                if pname != injected
+                and pname not in kwargs
+                and param.default is inspect.Parameter.empty
+                and param.kind in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                )
+            ]
+            if missing:
+                raise ToolArgumentError(
+                    name,
+                    f"requires {', '.join(repr(m) for m in missing)}; "
+                    f"its parameters are {', '.join(sorted(accepted)) or '(none)'}",
+                )
+            accepted_kwargs = kwargs
         if self._requires_ctx[name]:
-            return fn(ctx, **filtered)
-        return fn(**filtered)
+            return fn(ctx, **accepted_kwargs)
+        return fn(**accepted_kwargs)
 
 
 class RpcAdapter:
@@ -396,8 +468,34 @@ class ToolRegistry:
     def get(self, name: str) -> ToolDescriptor:
         if name not in self._tools:
             available = ", ".join(sorted(self._tools.keys()))
-            raise KeyError(f"Tool {name!r} not found (available: {available[:200]}...)")
+            raise KeyError(
+                f"Tool {name!r} not found (available: {available[:200]}...)"
+                f"{self._bundle_hint(name)}"
+            )
         return self._tools[name]
+
+    def _bundle_hint(self, name: str) -> str:
+        """Why a whole family of tools can be missing, said at the point of failure.
+
+        A dotted name whose prefix matches nothing here is most often a tool
+        bundle that never booted rather than a typo: bundles are started per
+        graph, from what the graph shows and from what its scripts call, so a
+        name built at run time or reached through a helper outside the graph
+        directory starts nothing. Listing what IS available cannot convey that
+        -- a reader sees a catalogue missing one family and concludes the
+        family is unavailable here. One self-learning agent concluded exactly
+        that and spent three iterations writing fallbacks around a segmenter it
+        could have had for one line.
+        """
+        prefix, dot, _ = name.partition(".")
+        if not dot or any(tool.startswith(f"{prefix}.") for tool in self._tools):
+            return ""
+        return (
+            f". No {prefix!r} tool is registered at all, so this is most likely a bundle "
+            f"that was not booted rather than a wrong name: a graph boots bundles from its "
+            f"tool nodes, the skills its subgraphs name, the tool names its own scripts "
+            f"literally call, and its workflow-level 'requires': {{'tools': ['{name}']}}"
+        )
 
     def __contains__(self, name: str) -> bool:
         return name in self._tools

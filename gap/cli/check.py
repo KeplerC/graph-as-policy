@@ -178,7 +178,13 @@ def _print_pretty(report) -> None:
 
         skill_rows = [s for s in report.skills if s.registry == spec.name]
         for s in skill_rows:
+            needs = (
+                "needs a connector providing " + ", ".join(s.connector_required)
+                if s.connector_required else ""
+            )
             if s.status == "ready":
+                if needs:
+                    print(f"  [skill] {s.name}: READY — {needs}")
                 continue
             reasons = []
             if s.blocked_by:
@@ -187,6 +193,8 @@ def _print_pretty(report) -> None:
                 reasons.append("own deps/requirements not ready")
             if s.unknown_tools:
                 reasons.append("unknown tools: " + ", ".join(s.unknown_tools))
+            if needs:
+                reasons.append(needs)
             print(f"  [skill] {s.name}: BLOCKED — {'; '.join(reasons)}")
 
     active = [b for b in report.bundles if not b.shadowed_by]

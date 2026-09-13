@@ -72,8 +72,9 @@ def test_skills_meta_dataclasses_construct():
     assert serving.command == ["python", "-m", "x"]
     assert serving.protocol == "in-process"
 
-    req = SkillRequires(gpu=True)
+    req = SkillRequires(gpu=True, connector=["motion.plan_joint"])
     assert req.gpu is True
+    assert req.connector == ["motion.plan_joint"]
 
     cs = CanonicalScript(name="n", path="scripts/n.py")
     assert cs.name == "n"
@@ -87,6 +88,9 @@ def test_schema_type_registry_resolves():
     from gap_core.schema import TYPE_REGISTRY, resolve_type
     assert "Se3Pose" in TYPE_REGISTRY
     assert resolve_type("Se3Pose") is TYPE_REGISTRY["Se3Pose"]
+    # The feature/payload/plan/curve vocabulary the manipulation skills declare.
+    for name in ("FunctionalFeature", "AttachedObject", "PoseSequence", "Centerline"):
+        assert name in TYPE_REGISTRY, name
 
 
 def test_no_gap_runtime_import_at_load():

@@ -699,6 +699,10 @@ class SkillRunnability:
     ``"unknown"`` (unresolvable prefix — flagged)."""
     blocked_by: list[str] = field(default_factory=list)
     unknown_tools: list[str] = field(default_factory=list)
+    connector_required: list[str] = field(default_factory=list)
+    """Tools the bundle declares under ``gap.requires.connector``: a
+    run-time connector must register them. Informational — a connector
+    cannot be probed statically, so this never blocks readiness."""
     self_ready: bool = True
     """The skill bundle's own deps/requirements verdict."""
 
@@ -714,6 +718,7 @@ class SkillRunnability:
             "tools": dict(self.tools),
             "blocked_by": list(self.blocked_by),
             "unknown_tools": list(self.unknown_tools),
+            "connector_required": list(self.connector_required),
         }
 
 
@@ -838,8 +843,16 @@ def build_check_report(
         tools: dict[str, str] = {}
         blocked: list[str] = []
         unknown: list[str] = []
+        declared = set(meta.requires.connector) if meta.requires is not None else set()
+        connector_required: list[str] = []
         for tool_name in meta.allowed_tools:
-            owner = _tool_owner(tool_name, owner_by_prefix)
+            if tool_name in declared:
+                # The bundle says a richer connector registers this one; the
+                # checker takes its word and reports it rather than probing.
+                owner = "connector"
+                connector_required.append(tool_name)
+            else:
+                owner = _tool_owner(tool_name, owner_by_prefix)
             tools[tool_name] = owner
             if owner == "unknown":
                 unknown.append(tool_name)
@@ -851,6 +864,7 @@ def build_check_report(
         skills.append(SkillRunnability(
             name=bundle.name, registry=bundle.registry, tools=tools,
             blocked_by=blocked, unknown_tools=unknown,
+            connector_required=connector_required,
             self_ready=bundle.status == "ready",
         ))
 

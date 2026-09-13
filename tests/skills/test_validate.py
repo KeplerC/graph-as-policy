@@ -160,6 +160,43 @@ def test_unknown_allowed_tools_fail(tmp_path: Path):
     assert any("nonexistent.tool" in i.message for i in report.errors)
 
 
+def test_connector_requirement_makes_a_tool_resolvable(tmp_path: Path):
+    """A skill written against a richer connector declares what it needs
+    under ``gap.requires.connector``; the checker takes its word for those
+    names and only those names."""
+    root = _make_checkout(tmp_path)
+    md = (root / "skills/good-skill/SKILL.md").read_text().replace(
+        "allowed_tools: [robot.get_observation, good-tool.compute]",
+        "allowed_tools: [robot.get_observation, good-tool.compute, motion.plan_joint]",
+    )
+    _write(root, "skills/good-skill/SKILL.md", md)
+    report = _by_name(validate_checkout(root))["good-skill"]
+    assert report.status == "FAIL"
+    assert any("motion.plan_joint" in i.message for i in report.errors)
+
+    declared = md.replace(
+        "gap:\n", "gap:\n  requires: {connector: [motion.plan_joint]}\n", 1,
+    )
+    _write(root, "skills/good-skill/SKILL.md", declared)
+    report = _by_name(validate_checkout(root))["good-skill"]
+    assert not any("motion.plan_joint" in i.message for i in report.errors)
+
+
+def test_connector_requirement_naming_a_provided_tool_warns(tmp_path: Path):
+    root = _make_checkout(tmp_path)
+    md = (root / "skills/good-skill/SKILL.md").read_text().replace(
+        "gap:\n",
+        "gap:\n  requires: {connector: [good-tool.compute, robot.get_observation]}\n",
+        1,
+    )
+    _write(root, "skills/good-skill/SKILL.md", md)
+    report = _by_name(validate_checkout(root))["good-skill"]
+    warnings = " | ".join(i.message for i in report.warnings)
+    assert "good-tool.compute" in warnings and "already declares" in warnings
+    assert "robot.get_observation" in warnings and "every gap connector" in warnings
+    assert not report.errors
+
+
 def test_unnamespaced_declared_tool_fails(tmp_path: Path):
     root = _make_checkout(tmp_path)
     md = _TOOL_MD.replace("good-tool.compute", "compute")

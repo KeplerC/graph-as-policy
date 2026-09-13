@@ -250,7 +250,17 @@ def execute_skill_node(
 
 
 def _get_output_keys(run_fn: Any, module: Any) -> set[str]:
-    """Extract declared output keys from run()'s return TypedDict annotation."""
+    """The output keys a node MUST return, from run()'s return TypedDict.
+
+    ``__required_keys__`` is the answer, not ``__annotations__``: a field
+    written ``NotRequired[T]`` (or any field of a ``total=False`` TypedDict)
+    is declared and optional, which is the whole point of the annotation.
+    Reading every annotation made a script that returns a measurement only
+    when it has one fail on the run where it has none -- so an author's
+    choice was between deleting the annotation and returning a placeholder,
+    and the scripts that hit it did delete it, which lost the documentation
+    the type was there to give.
+    """
     try:
         hints = typing.get_type_hints(run_fn, globalns=vars(module))
     except Exception:
@@ -258,6 +268,9 @@ def _get_output_keys(run_fn: Any, module: Any) -> set[str]:
     return_hint = hints.get("return")
     if return_hint is None or return_hint is type(None):
         return set()
+    required = getattr(return_hint, "__required_keys__", None)
+    if required is not None:
+        return set(required)
     if hasattr(return_hint, "__annotations__"):
         return set(return_hint.__annotations__.keys())
     return set()

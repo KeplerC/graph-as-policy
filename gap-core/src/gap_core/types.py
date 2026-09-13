@@ -50,6 +50,12 @@ __all__ = [
     "CollisionMesh",
     "WorldConfig",
     "GraspCandidates",
+    "FunctionalFeature",
+    "CollisionSphere",
+    "AttachedObject",
+    "PoseWaypoint",
+    "PoseSequence",
+    "Centerline",
     "identity_pose",
     "make_pose",
     "quat_xyzw_to_wxyz",
@@ -180,6 +186,80 @@ class WorldConfig(TypedDict):
 class GraspCandidates(TypedDict):
     poses: list[Se3Pose]  # best-first
     scores: NotRequired[list[float]]
+
+
+# ---------------------------------------------------------------------------
+# Features, payloads, plans, curves
+# ---------------------------------------------------------------------------
+
+
+class FunctionalFeature(TypedDict):
+    """A typed functional part of an object or fixture: a loop, shaft, tip,
+    aperture, surface or region, with the metric geometry a mate needs."""
+
+    kind: str  # loop | shaft | tip | aperture | surface | region
+    pose: Se3Pose  # the feature frame, in the frame the producer states
+    axis: Vec3  # loop/aperture normal or shaft/tip direction, unit, sign-resolved by the fitter
+    description: NotRequired[str]
+    confidence: NotRequired[float]
+    fit_quality: NotRequired[float]
+    radius_inner: NotRequired[float]  # meters; loops and apertures
+    radius_outer: NotRequired[float]  # meters; shafts, tips, and the ring around a loop
+    length: NotRequired[float]  # meters; shafts and tips
+    usable_length: NotRequired[float]  # meters; how much of a shaft a mate may cover
+    insertion_depth: NotRequired[float]  # meters; how far into an aperture a mate seats
+    seating_margin: NotRequired[float]  # meters
+    local_center: NotRequired[Vec3]  # the feature centre in the parent object's frame
+
+
+class CollisionSphere(TypedDict):
+    center: list[float]  # [x, y, z] in AttachedObject.frame
+    radius: float  # meters
+
+
+class AttachedObject(TypedDict):
+    """A held object's collision model, expressed in the TCP frame so a
+    planner can carry it: what every attached-object plan is solved against."""
+
+    frame: str  # "tcp"
+    spheres: list[CollisionSphere]
+    sphere_fit_type: NotRequired[str]  # morphit | surface | voxel
+    sphere_radius_shrink_m: NotRequired[float]
+
+
+class PoseWaypoint(TypedDict):
+    pose: Se3Pose
+    mode: NotRequired[str]  # contact_transition | planned_joint | planned_linear | contact_seat | cartesian_cross
+    cartesian: NotRequired[bool]
+    allow_goal_contact: NotRequired[bool]
+    allow_start_contact: NotRequired[bool]
+
+
+class PoseSequence(TypedDict):
+    """An ordered plan of TCP poses, with the world and the payload it was
+    solved against so an executor can re-plan a leg without re-deriving them."""
+
+    waypoints: list[PoseWaypoint]
+    time_scale: NotRequired[float]
+    world_config: NotRequired[WorldConfig]
+    attached_object: NotRequired[AttachedObject]
+
+
+class Centerline(TypedDict):
+    """An ordered, arc-length-parameterised 3D centreline of a deformable
+    linear object -- a cable, rope or hose -- as a fitter or tracker returns it.
+
+    ``points`` is a plain list of ``[x, y, z]`` triples rather than an array
+    so the value survives JSON and a node may write ``fit.get("points") or []``.
+    """
+
+    points: list[list[float]]  # [[x, y, z], ...] meters, in order along the object
+    arclength_m: float
+    radius_m: float
+    nodes: int
+    ordered: bool  # False when the skeleton could not be ordered and the points are a fallback
+    visibility: NotRequired[list[float]]  # per node, 0..1, from a tracker
+    tracked: NotRequired[bool]
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@
 from typing import TypedDict
 
 import pytest
+from gap_core.errors import ToolArgumentError
 from gap_core.tools import RESERVED_TOOL_PREFIXES, ToolRegistry, tool
 from gap_core.tools._registry import _PENDING_TOOLS
 
@@ -133,14 +134,25 @@ def test_register_callable_collision_always_raises():
 # --- dispatch ---
 
 
-def test_dispatch_filters_unknown_kwargs():
+def test_dispatch_refuses_unknown_kwargs():
+    """An argument the tool does not declare is an error, not a shrug.
+
+    Filtering it away used to look harmless. It is not: the tool then runs on
+    its *defaults* and reports success, so a caller that misremembered a
+    parameter name gets a plausible wrong answer instead of a correction.
+    """
     @tool(name="math.add", summary="Add two ints.")
     def add(a: int, b: int) -> SumOutput:
         return {"sum": a + b}
 
     reg = ToolRegistry()
     reg.discover_pending()
-    assert reg.invoke("math.add", a=1, b=2, extraneous="ignored") == {"sum": 3}
+    assert reg.invoke("math.add", a=1, b=2) == {"sum": 3}
+    with pytest.raises(ToolArgumentError) as excinfo:
+        reg.invoke("math.add", a=1, b=2, extraneous="ignored")
+    # The message has to carry the accepted names, or the caller cannot fix it.
+    assert "extraneous" in str(excinfo.value)
+    assert "a, b" in str(excinfo.value)
 
 
 def test_requires_ctx_injection():

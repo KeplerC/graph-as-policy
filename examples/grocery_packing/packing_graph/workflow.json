@@ -219,7 +219,7 @@
       "on_error": "not_found"
     },
     "grasp_sg": {
-      "skill": "grasping-with-planner",
+      "skill": "generic",
       "inputs": {
         "target_obb": "OrientedBoundingBox"
       },
