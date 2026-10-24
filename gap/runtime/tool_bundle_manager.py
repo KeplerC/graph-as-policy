@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 _SHARED_LOCK = threading.RLock()
 """Guards :data:`_SHARED`. Re-entrant because a boot failure releases under it."""
 
-_SHARED: dict[tuple, "_SharedClient"] = {}
+_SHARED: dict[tuple, _SharedClient] = {}
 """Live bundle clients, keyed by what makes two requests the same server.
 
 Process-global on purpose: the whole point is that managers which know

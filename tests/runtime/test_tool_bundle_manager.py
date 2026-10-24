@@ -24,8 +24,8 @@ from gap.runtime.tool_bundle_boot import (
 )
 from gap.runtime.tool_bundle_manager import (
     ToolBundleManager,
-    shared_client_counts,
     ToolBundleStartupError,
+    shared_client_counts,
 )
 
 
