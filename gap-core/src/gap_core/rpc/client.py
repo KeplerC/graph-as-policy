@@ -233,6 +233,20 @@ class ToolClient:
             finally:
                 timer.cancel()
 
+    def alive(self) -> bool:
+        """Whether the subprocess is still running and its stdin still open.
+
+        A cheap, non-blocking check (``poll``), so a caller holding a client
+        across episodes can tell a server that died in between -- a reply
+        timeout kills it, as does a crash or the OOM killer -- from one that
+        can take the next call, without sending one.
+        """
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return False
+        stdin = proc.stdin
+        return stdin is not None and not stdin.closed
+
     def close(self) -> None:
         """Terminate the subprocess. Idempotent."""
         if self._proc is None:

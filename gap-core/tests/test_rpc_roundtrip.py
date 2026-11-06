@@ -269,3 +269,35 @@ def test_call_timeout_terminates_hung_call(bundle_dir):
         assert elapsed < 15.0, f"timeout took {elapsed:.1f}s"
     finally:
         c.close()
+
+
+def test_alive_tracks_the_subprocess(bundle_dir):
+    """``alive()`` is what a caller keeping a client across episodes asks
+    before reusing it: true while the server runs, false once it is killed
+    out from under the client, and false after ``close()``."""
+    import signal
+
+    from gap_core.rpc.client import ToolClient
+
+    def spawn() -> ToolClient:
+        return ToolClient(
+            bundle_name="fake",
+            bundle_dir=bundle_dir,
+            command=[sys.executable, "-m", "gap_core.rpc.server", "--bundle", "fake"],
+            use_uv=False,
+            evict_grace_s=1.0,
+        )
+
+    killed = spawn()
+    try:
+        assert killed.alive()
+        os.killpg(os.getpgid(killed._proc.pid), signal.SIGKILL)
+        killed._proc.wait(timeout=10)
+        assert not killed.alive()
+    finally:
+        killed.close()
+
+    closed = spawn()
+    assert closed.alive()
+    closed.close()
+    assert not closed.alive()

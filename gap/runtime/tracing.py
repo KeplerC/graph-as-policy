@@ -150,12 +150,28 @@ def _camera_frame_name(obj: Any) -> str | None:
     return None
 
 
+def trace_assets_enabled() -> bool:
+    """Whether traces extract images, masks, depth and point clouds as files.
+
+    ``GAP_TRACE_ASSETS=0`` turns it off: the JSON records (``request.json``,
+    ``response.json``, ``output.json``) and ``dag_trace.json`` are still
+    written, with arrays as their ``<ndarray shape=... dtype=...>``
+    placeholders, but no PNG/npy/npz is encoded. Encoding is the expensive part
+    of tracing on a perception graph -- a 720p RGB PNG is ~90 ms, a depth map is
+    3.7 MB of npy -- and it runs on the graph's own thread for every tool call,
+    so a batch evaluation that never opens the viewer pays it on every episode.
+    Default on.
+    """
+    return os.environ.get("GAP_TRACE_ASSETS", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
 def _extract_assets(value: Any, assets_dir: Path, prefix: str = "") -> list[str]:
     """Walk a dict/list/ndarray payload and extract images/masks/point clouds as files.
 
-    Returns list of relative paths (relative to node_data/<id>/).
+    Returns list of relative paths (relative to node_data/<id>/). Returns none
+    when :func:`trace_assets_enabled` is off.
     """
-    if value is None:
+    if value is None or not trace_assets_enabled():
         return []
 
     assets: list[str] = []

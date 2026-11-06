@@ -341,3 +341,14 @@ def test_copy_workflow(tmp_path):
     trace.copy_workflow(workflow_dir)
     assert (out / "workflow.json").read_text() == '{"nodes": {}}'
     assert (out / "scripts" / "servo.py").exists()
+
+
+def test_trace_assets_off_writes_no_files(tmp_path, monkeypatch):
+    """GAP_TRACE_ASSETS=0 skips every asset file; the default still writes them."""
+    image = np.zeros((32, 48, 3), dtype=np.uint8)
+    payload = {"rgb": image, "mask": np.ones((32, 48), dtype=np.uint8), "depth": np.ones((32, 48), np.float32)}
+    monkeypatch.setenv("GAP_TRACE_ASSETS", "0")
+    assert _extract_assets(payload, tmp_path, "request") == []
+    assert list(tmp_path.iterdir()) == []
+    monkeypatch.delenv("GAP_TRACE_ASSETS")
+    assert _extract_assets(image, tmp_path, "output_frame")

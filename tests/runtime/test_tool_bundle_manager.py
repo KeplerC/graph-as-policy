@@ -17,15 +17,18 @@ import pytest
 from gap_core.tools import ToolRegistry
 from gap_core.tools._registry import RpcAdapter
 
+from gap.runtime import tool_bundle_manager as tbm
 from gap.runtime.tool_bundle_boot import (
     boot_tool_bundles,
     required_rpc_tool_bundles,
     script_tool_names,
 )
 from gap.runtime.tool_bundle_manager import (
+    LINGER_ENV,
     ToolBundleManager,
-    shared_client_counts,
     ToolBundleStartupError,
+    close_shared_clients,
+    shared_client_counts,
 )
 
 
@@ -60,6 +63,7 @@ class _FakeToolClient:
         ]
         self.calls = []
         self.closed = False
+        self.dead = False  # set by a test: the subprocess died under us
         self._on_call = on_call
 
     def call(self, tool, /, **kwargs):
@@ -70,6 +74,9 @@ class _FakeToolClient:
 
     def close(self):
         self.closed = True
+
+    def alive(self):
+        return not (self.dead or self.closed)
 
 
 class _FakeSkillInfo:
@@ -119,11 +126,11 @@ def fake_client_cls(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _clean_shared_clients():
+def _clean_shared_clients(monkeypatch):
     """The client cache is process-global by design, so a test that leaks a
-    reference would be read by the next one as a shared server."""
-    from gap.runtime import tool_bundle_manager as tbm
-
+    reference would be read by the next one as a shared server. Lingering is
+    off unless a test turns it on, whatever the developer's shell says."""
+    monkeypatch.delenv(LINGER_ENV, raising=False)
     tbm._SHARED.clear()
     yield
     tbm._SHARED.clear()
@@ -313,6 +320,259 @@ def test_shutdown_is_idempotent(fake_client_cls, tmp_path):
     mgr.shutdown_all()
     mgr.shutdown_all()  # second call is a no-op
     assert fake_client_cls[0].closed is True
+
+
+# ---------------------------------------------------------------------------
+# GAP_TOOL_BUNDLE_LINGER: a server that outlives its episode
+# ---------------------------------------------------------------------------
+
+
+def _episode(tmp_path):
+    """One episode's manager over a fresh ToolRegistry, the way a simulator
+    connector hands ``gap.execute`` a new registry every episode."""
+    registry = _FakeSkillRegistry({
+        "sam3": _FakeSkillInfo(bundle_dir=tmp_path / "sam3", protocol="stdio-msgpack"),
+    })
+    return ToolBundleManager(skill_registry=registry, tool_registry=ToolRegistry())
+
+
+def test_without_linger_the_last_release_still_closes(fake_client_cls, tmp_path, monkeypatch):
+    """Unset (or anything but a yes) is the reference count exactly: the
+    episode that lets go last closes the server and the next one boots anew."""
+    monkeypatch.setenv(LINGER_ENV, "0")
+    first = _episode(tmp_path)
+    first.boot_all(["sam3"])
+    first.shutdown_all()
+    assert fake_client_cls[0].closed
+    assert shared_client_counts() == {}
+    _episode(tmp_path).boot_all(["sam3"])
+    assert len(fake_client_cls) == 2
+
+
+def test_linger_hands_the_next_episode_the_same_server(fake_client_cls, tmp_path, monkeypatch):
+    """The reason it exists: thirty episodes in one process loaded the
+    segmenter thirty times, ~20 s and 6.3 GiB of GPU apiece."""
+    monkeypatch.setenv(LINGER_ENV, "1")
+    first = _episode(tmp_path)
+    first.boot_all(["sam3"])
+    first.shutdown_all()
+    client = fake_client_cls[0]
+    assert not client.closed, "the last release closed a server lingering was asked to keep"
+    assert shared_client_counts() == {"sam3": 0}
+
+    second = _episode(tmp_path)
+    second.boot_all(["sam3"])
+    assert len(fake_client_cls) == 1, "the next episode booted a second server"
+    assert second._managed["sam3"].client is client
+    assert shared_client_counts() == {"sam3": 1}
+
+
+def test_a_reused_server_registers_into_the_new_episodes_registry(fake_client_cls, tmp_path, monkeypatch):
+    """Per-episode state is the registry, and it is rebuilt every episode: the
+    reused server's catalog has to land in the new one, under the RPC
+    transport, and dispatch to the server that is actually alive."""
+    monkeypatch.setenv(LINGER_ENV, "1")
+    first = _episode(tmp_path)
+    first.boot_all(["sam3"])
+    first.shutdown_all()
+
+    second = _episode(tmp_path)
+    second.boot_all(["sam3"])
+    registry = second._tool_registry
+    assert registry is not first._tool_registry
+    assert registry.get("sam3.echo").transport == "rpc"
+    assert registry.invoke("sam3.echo", None, x=2) == {"echoed": {"x": 2}}
+    assert fake_client_cls[0].calls == [("sam3.echo", {"x": 2})]
+
+
+def test_linger_respawns_a_server_that_died_while_parked(fake_client_cls, tmp_path, monkeypatch):
+    """A parked server can die between episodes -- a reply timeout kills its
+    process group, so can the OOM killer. Handing that corpse to the next
+    episode would fail its first perception call; it is replaced instead."""
+    monkeypatch.setenv(LINGER_ENV, "1")
+    first = _episode(tmp_path)
+    first.boot_all(["sam3"])
+    first.shutdown_all()
+    corpse = fake_client_cls[0]
+    corpse.dead = True
+
+    second = _episode(tmp_path)
+    second.boot_all(["sam3"])
+    assert len(fake_client_cls) == 2, "a dead server was handed out instead of respawned"
+    fresh = fake_client_cls[1]
+    assert second._managed["sam3"].client is fresh
+    assert corpse.closed, "the dead server's pipes were not reaped"
+    assert shared_client_counts() == {"sam3": 1}
+    assert second._tool_registry.invoke("sam3.echo", None, y=1) == {"echoed": {"y": 1}}
+    assert fresh.calls == [("sam3.echo", {"y": 1})]
+
+
+def test_a_respawn_that_fails_still_reaps_the_dead_server(fake_client_cls, tmp_path, monkeypatch):
+    """The replacement not coming up is a startup error, as any boot failure
+    is -- and the corpse is still closed, not left in the cache to be handed
+    out on the next try."""
+    monkeypatch.setenv(LINGER_ENV, "1")
+    first = _episode(tmp_path)
+    first.boot_all(["sam3"])
+    first.shutdown_all()
+    corpse = fake_client_cls[0]
+    corpse.dead = True
+
+    def _failing(*args, **kwargs):
+        return _FakeToolClient(*args, raise_on_init=True, **kwargs)
+
+    monkeypatch.setattr("gap_core.rpc.client.ToolClient", _failing)
+    with pytest.raises(ToolBundleStartupError, match="failed to start"):
+        _episode(tmp_path).boot_all(["sam3"])
+    assert corpse.closed
+    assert shared_client_counts() == {}
+
+
+def test_a_dead_server_is_replaced_without_corrupting_its_holders_count(fake_client_cls, tmp_path, monkeypatch):
+    """A world still holding a server that has died keeps its reference to
+    that one; the replacement a later world gets is counted separately, so the
+    old holder's release closes the corpse and nothing else."""
+    monkeypatch.setenv(LINGER_ENV, "1")
+    holder, latecomer = _two_worlds(tmp_path, fake_client_cls)
+    holder.boot_all(["sam3"])
+    corpse = fake_client_cls[0]
+    corpse.dead = True
+    latecomer.boot_all(["sam3"])
+    fresh = fake_client_cls[1]
+    assert latecomer._managed["sam3"].client is fresh
+    assert not corpse.closed, "a server another world holds was closed under it"
+
+    holder.shutdown_all()
+    assert corpse.closed
+    assert not fresh.closed
+    assert shared_client_counts() == {"sam3": 1}
+    latecomer.shutdown_all()
+    assert not fresh.closed, "the replacement did not linger"
+    assert shared_client_counts() == {"sam3": 0}
+
+
+def test_linger_keeps_the_count_for_worlds_of_one_wave(fake_client_cls, tmp_path, monkeypatch):
+    """The fleet path: worlds of a wave still share one server and count it;
+    lingering only changes what happens when the count reaches zero."""
+    monkeypatch.setenv(LINGER_ENV, "1")
+    first, second = _two_worlds(tmp_path, fake_client_cls)
+    first.boot_all(["sam3"])
+    second.boot_all(["sam3"])
+    assert shared_client_counts() == {"sam3": 2}
+    first.shutdown_all()
+    first.shutdown_all()
+    assert shared_client_counts() == {"sam3": 1}
+    second.shutdown_all()
+    assert shared_client_counts() == {"sam3": 0}
+    third, fourth = _two_worlds(tmp_path, fake_client_cls)
+    third.boot_all(["sam3"])
+    fourth.boot_all(["sam3"])
+    assert len(fake_client_cls) == 1
+    assert shared_client_counts() == {"sam3": 2}
+
+
+def test_lingering_servers_are_closed_at_exit(fake_client_cls, tmp_path, monkeypatch):
+    """A parked server belongs to nobody, so the interpreter's exit closes it."""
+    registered = []
+    monkeypatch.setattr(tbm.atexit, "register", registered.append)
+    monkeypatch.setattr(tbm, "_ATEXIT_REGISTERED", False)
+    monkeypatch.setenv(LINGER_ENV, "1")
+    first = _episode(tmp_path)
+    first.boot_all(["sam3"])
+    first.shutdown_all()
+    assert registered == [close_shared_clients]
+    registered[0]()
+    assert fake_client_cls[0].closed
+    assert shared_client_counts() == {}
+
+
+def test_without_linger_nothing_is_registered_at_exit(fake_client_cls, tmp_path, monkeypatch):
+    registered = []
+    monkeypatch.setattr(tbm.atexit, "register", registered.append)
+    monkeypatch.setattr(tbm, "_ATEXIT_REGISTERED", False)
+    first = _episode(tmp_path)
+    first.boot_all(["sam3"])
+    first.shutdown_all()
+    assert registered == []
+
+
+def test_a_forked_child_does_not_inherit_the_parents_servers(fake_client_cls, tmp_path, monkeypatch):
+    """Two processes on one pipe would interleave two conversations on a wire
+    that is strictly one request, one reply. A child starts with no servers."""
+    monkeypatch.setenv(LINGER_ENV, "1")
+    first = _episode(tmp_path)
+    first.boot_all(["sam3"])
+    first.shutdown_all()
+    assert shared_client_counts() == {"sam3": 0}
+    lock = tbm._SHARED_LOCK
+    try:
+        tbm._forget_inherited()  # what os.register_at_fork runs in the child
+        assert shared_client_counts() == {}
+        assert not fake_client_cls[0].closed, "a child closed a server that is its parent's"
+    finally:
+        tbm._SHARED_LOCK = lock
+
+
+_REAL_BUNDLE = """
+import os
+from gap_core.tools import tool
+
+
+@tool(name="fake.pid", summary="The server's process id")
+def pid() -> dict:
+    return {"pid": os.getpid()}
+"""
+
+
+def test_linger_with_real_subprocesses(tmp_path, monkeypatch):
+    """End to end over real stdio servers: the second episode talks to the
+    first episode's process, and after that process is killed the third
+    episode gets a new one without being told."""
+    import os
+    import signal
+    import sys
+
+    from gap_core.rpc import client as client_mod
+
+    bundle = tmp_path / "fake"
+    bundle.mkdir()
+    (bundle / "tools.py").write_text(_REAL_BUNDLE)
+    real = client_mod.ToolClient
+
+    def _direct(*args, **kwargs):
+        # The bundle's own venv is this one; skip `uv run --project`.
+        return real(*args, command=[sys.executable, "-m", "gap_core.rpc.server", "--bundle", "fake"],
+                    use_uv=False, **kwargs)
+
+    monkeypatch.setattr(client_mod, "ToolClient", _direct)
+    monkeypatch.setenv(LINGER_ENV, "1")
+    registry = _FakeSkillRegistry({"fake": _FakeSkillInfo(bundle_dir=bundle)})
+
+    def episode():
+        mgr = ToolBundleManager(skill_registry=registry, tool_registry=ToolRegistry(), evict_grace_s=1.0)
+        mgr.boot_all(["fake"])
+        try:
+            return mgr._tool_registry.invoke("fake.pid", None)["pid"], mgr._managed["fake"].client
+        finally:
+            mgr.shutdown_all()
+
+    try:
+        first_pid, first = episode()
+        assert first.alive()
+        second_pid, second = episode()
+        assert second is first and second_pid == first_pid
+
+        os.killpg(os.getpgid(first._proc.pid), signal.SIGKILL)
+        first._proc.wait(timeout=10)
+        assert not first.alive()
+
+        third_pid, third = episode()
+        assert third is not first
+        assert third_pid != first_pid
+        assert third.alive()
+    finally:
+        assert close_shared_clients() >= 0
+    assert not third.alive()
 
 
 # ---------------------------------------------------------------------------

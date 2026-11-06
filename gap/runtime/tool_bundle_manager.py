@@ -31,11 +31,28 @@ sequential (one request, one reply, ids checked), so concurrent callers queue
 instead of interleaving. What they buy for that queueing is measured too --
 twelve worlds' perception serialised through one server cost ~1.2 s more per
 episode than twelve parallel servers, against ~70 GiB of GPU recovered.
+
+**Lingering across episodes: ``GAP_TOOL_BUNDLE_LINGER=1``.** The reference
+count above dies at the end of every episode, so a benchmark that runs thirty
+episodes in one process loaded the segmenter thirty times: ~20 s of SAM3 build
+(6.3 GiB of GPU) plus ~9 s of GroundingDINO, at the top of every episode,
+measured on one tool_hanging rollout. With the variable set, a server whose
+count reaches zero is *parked* instead of closed, and the next acquire of the
+same key -- the next episode's manager -- takes it back. Nothing about what a
+graph sees changes: each episode still registers the catalog into its own
+fresh ``ToolRegistry``. A parked server that has died in the meantime (a
+reply-timeout kill, a crash, an OOM) is noticed at reuse and respawned in its
+place, so a dead process is never handed out. Everything left at interpreter
+exit is closed by an ``atexit`` hook. The price is the reason it is opt-in:
+the parked servers keep their GPU memory between episodes, and between runs
+if the process lives on. Unset, the behaviour is exactly the reference count's.
 """
 
 from __future__ import annotations
 
+import atexit
 import logging
+import os
 import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -56,10 +73,144 @@ subprocess. Nothing here is keyed by manager, and a manager that never shares
 """
 
 
+LINGER_ENV = "GAP_TOOL_BUNDLE_LINGER"
+"""Set to ``1`` to keep a shared server alive after its last manager lets go."""
+
+
+def linger_enabled() -> bool:
+    """Whether :data:`LINGER_ENV` asks for servers to outlive their episode.
+
+    Read at every release and acquire rather than once at import, so a caller
+    (or a test) that sets it after ``gap`` was imported is still obeyed.
+    """
+    return os.environ.get(LINGER_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass
 class _SharedClient:
     client: Any
     refs: int
+
+
+def _client_alive(client: Any) -> bool:
+    """Whether *client*'s subprocess can still take a call.
+
+    Asked of ``ToolClient.alive`` where it exists; an older gap-core without it
+    is asked through its process handle, and anything with neither (a test's
+    stand-in) is taken at its word.
+    """
+    probe = getattr(client, "alive", None)
+    if callable(probe):
+        try:
+            return bool(probe())
+        except Exception:
+            return False
+    proc = getattr(client, "_proc", None)
+    if proc is not None and hasattr(proc, "poll"):
+        try:
+            return proc.poll() is None
+        except Exception:
+            return False
+    return True
+
+
+def _client_pid(client: Any) -> Any:
+    """The subprocess id, for the boot/reuse log line; ``None`` when unknown."""
+    return getattr(getattr(client, "_proc", None), "pid", None)
+
+
+def _close_quietly(client: Any) -> None:
+    try:
+        client.close()
+    except BaseException:
+        logger.warning("closing a shared tool bundle client failed", exc_info=True)
+
+
+_ATEXIT_REGISTERED = False
+
+
+def _ensure_atexit() -> None:
+    """Close whatever is still cached when the interpreter exits. Registered
+    the first time a server is parked, so a process that never lingers runs
+    exactly the code it always did."""
+    global _ATEXIT_REGISTERED
+    if not _ATEXIT_REGISTERED:
+        atexit.register(close_shared_clients)
+        _ATEXIT_REGISTERED = True
+
+
+def close_shared_clients() -> int:
+    """Close every cached server, parked or not, and forget them. Returns how many.
+
+    The ``atexit`` hook :data:`LINGER_ENV` installs, and the explicit way to
+    give the GPU back between runs in a long-lived process. Any manager still
+    holding one of these afterwards holds a closed client; it is for the end of
+    the work, not the middle of it.
+    """
+    with _SHARED_LOCK:
+        entries = list(_SHARED.values())
+        _SHARED.clear()
+    for entry in entries:
+        _close_quietly(entry.client)
+    return len(entries)
+
+
+def _forget_inherited() -> None:
+    """After ``fork``: the parent's servers are the parent's.
+
+    A child that took one would write into a pipe the parent is also writing
+    into, and the strictly sequential wire would interleave two conversations.
+    Parked servers make an inherited cache the normal case rather than a race,
+    so the child starts with an empty one -- and a fresh lock, since the
+    parent's may have been held by another thread at the instant of the fork.
+    Nothing is closed: the processes are not the child's to close.
+    """
+    global _SHARED_LOCK
+    _SHARED_LOCK = threading.RLock()
+    _SHARED.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_forget_inherited)
+
+
+SHARE_DIR_ENV = "GAP_TOOL_SHARE_DIR"
+"""A directory for shared tool servers' sockets. Unset: every process runs its own servers."""
+SHARE_BUNDLES_ENV = "GAP_TOOL_SHARE_BUNDLES"
+"""Comma-separated bundles to share when :data:`SHARE_DIR_ENV` is set (default: sam3,grounding-dino)."""
+SHARE_OWNER_ENV = "GAP_TOOL_SHARE_OWNER"
+"""The pid whose exit stops the shared servers (a benchmark run's driver); 0 or unset: idleness only."""
+DEFAULT_SHARED_BUNDLES = ("sam3", "grounding-dino")
+"""The GPU-heavy, stateless-per-call bundles: about 6 GB and 3 GB a copy. Not ``vlm``, whose
+calls are seconds-long network waits that a shared server would serialise."""
+
+
+def _shared_server_kwargs(name: str, bundle_dir: Any, env: Any) -> dict:
+    """``ToolClient`` arguments that reach a shared server through a relay, or ``{}``.
+
+    One broker per bundle, bundle environment and GPU: the socket name hashes
+    all three, so processes on different GPUs, or with different bundle
+    settings, never share a server.
+    """
+    share_dir = os.environ.get(SHARE_DIR_ENV, "").strip()
+    if not share_dir:
+        return {}
+    wanted = os.environ.get(SHARE_BUNDLES_ENV, "").strip()
+    bundles = tuple(b.strip() for b in wanted.split(",") if b.strip()) if wanted else DEFAULT_SHARED_BUNDLES
+    if name not in bundles:
+        return {}
+    import hashlib
+    import sys
+
+    ident = repr((name, str(bundle_dir), sorted((env or {}).items()), os.environ.get("CUDA_VISIBLE_DEVICES", "")))
+    digest = hashlib.sha1(ident.encode()).hexdigest()[:10]
+    socket_path = os.path.join(share_dir, f"{name}-{digest}.sock")
+    command = [
+        sys.executable, "-m", "gap_core.rpc.relay",
+        "--socket", socket_path, "--bundle", name, "--bundle-dir", str(bundle_dir),
+        "--owner-pid", os.environ.get(SHARE_OWNER_ENV, "0").strip() or "0",
+    ]
+    return {"command": command, "use_uv": False}
 
 
 def _client_key(name: str, bundle_dir: Any, env: Any) -> tuple:
@@ -77,39 +228,78 @@ def _client_key(name: str, bundle_dir: Any, env: Any) -> tuple:
     return (str(name), str(bundle_dir), stamp)
 
 
-def _acquire_client(key: tuple, make: Any) -> tuple[Any, bool]:
-    """The cached client for ``key``, or one built by ``make``. Returns
-    ``(client, booted_now)``.
+def _acquire_client(key: tuple, make: Any) -> tuple[_SharedClient, str]:
+    """The cached entry for ``key``, or one built by ``make``. Returns
+    ``(entry, how)`` where *how* is ``"booted"``, ``"shared"`` (another manager
+    holds it right now) or ``"lingering"`` (parked by :data:`LINGER_ENV`).
 
     ``make`` runs while the cache lock is held, which is deliberate: eleven
     threads waiting ~20 s for one model to load is the same wall clock as
     eleven threads each loading their own, and it is the only ordering where
     the second caller cannot start a second subprocess.
+
+    With lingering on, a cached server whose process has died is replaced
+    rather than handed out. The dead entry leaves the cache; whoever still
+    holds it releases it by identity (see :func:`_release_client`), so its
+    count cannot be confused with the replacement's.
+    """
+    dead: _SharedClient | None = None
+    try:
+        with _SHARED_LOCK:
+            shared = _SHARED.get(key)
+            if shared is not None and linger_enabled() and not _client_alive(shared.client):
+                proc = getattr(shared.client, "_proc", None)
+                logger.warning(
+                    "[tool-bundle:%s] cached server (pid %s) is dead (returncode=%s); respawning it",
+                    key[0], _client_pid(shared.client), getattr(proc, "returncode", None),
+                )
+                _SHARED.pop(key, None)
+                if shared.refs <= 0:
+                    dead = shared
+                shared = None
+            if shared is not None:
+                how = "shared" if shared.refs > 0 else "lingering"
+                shared.refs += 1
+                return shared, how
+            entry = _SharedClient(client=make(), refs=1)
+            _SHARED[key] = entry
+    finally:
+        if dead is not None:
+            # Reaps the corpse and closes its pipes, whether or not its
+            # replacement came up; nothing is listening.
+            _close_quietly(dead.client)
+    return entry, "booted"
+
+
+def _release_client(key: tuple, entry: _SharedClient | None = None) -> None:
+    """Give back one reference; close the subprocess when the last one goes.
+
+    *entry* is the one this caller acquired. Without it the cache's current
+    entry for *key* is assumed, which is the same thing unless a dead server
+    was replaced in between -- the case the identity is passed for.
+
+    With :data:`LINGER_ENV` set, a live server whose count reaches zero stays
+    cached for the next acquire instead of closing.
     """
     with _SHARED_LOCK:
-        shared = _SHARED.get(key)
-        if shared is not None:
-            shared.refs += 1
-            return shared.client, False
-        client = make()
-        _SHARED[key] = _SharedClient(client=client, refs=1)
-        return client, True
-
-
-def _release_client(key: tuple) -> None:
-    """Give back one reference; close the subprocess when the last one goes."""
-    with _SHARED_LOCK:
-        shared = _SHARED.get(key)
-        if shared is None:
+        current = _SHARED.get(key)
+        if entry is None:
+            entry = current
+        if entry is None or entry.refs <= 0:
             return
-        shared.refs -= 1
-        if shared.refs > 0:
+        entry.refs -= 1
+        if entry.refs > 0:
             return
-        _SHARED.pop(key, None)
-    try:
-        shared.client.close()
-    except BaseException:
-        logger.warning("closing a shared tool bundle client failed", exc_info=True)
+        if current is entry:
+            if linger_enabled() and _client_alive(entry.client):
+                _ensure_atexit()
+                logger.info(
+                    "[tool-bundle:%s] last user released; server (pid %s) lingers for reuse (%s=1)",
+                    key[0], _client_pid(entry.client), LINGER_ENV,
+                )
+                return
+            _SHARED.pop(key, None)
+    _close_quietly(entry.client)
 
 
 class ToolBundleStartupError(RuntimeError):
@@ -123,6 +313,7 @@ class _Managed:
     client: Any  # ToolClient
     tool_names: list[str]
     key: tuple  # into _SHARED; this manager holds one reference to it
+    entry: _SharedClient | None = None  # the reference itself, released by identity
 
 
 class ToolBundleManager:
@@ -173,7 +364,7 @@ class ToolBundleManager:
                     continue
                 key = _client_key(name, info.meta.bundle_dir, serving.env)
                 try:
-                    client, booted = _acquire_client(
+                    shared, how = _acquire_client(
                         key,
                         lambda name=name, info=info, serving=serving: ToolClient(
                             bundle_name=name,
@@ -181,6 +372,7 @@ class ToolBundleManager:
                             env=serving.env,
                             evict_grace_s=self._grace,
                             call_timeout_s=self._call_timeout_s,
+                            **_shared_server_kwargs(name, info.meta.bundle_dir, serving.env),
                         ),
                     )
                 except BaseException as exc:
@@ -188,9 +380,15 @@ class ToolBundleManager:
                         f"tool bundle {name!r}: failed to start its server "
                         f"({type(exc).__name__}: {exc})"
                     ) from exc
+                client = shared.client
                 logger.info(
-                    "[tool-bundle:%s] %s", name,
-                    "booting" if booted else "reusing this process's server",
+                    "[tool-bundle:%s] %s (pid %s)", name,
+                    {
+                        "booted": "booting",
+                        "shared": "reusing this process's server",
+                        "lingering": "reusing this process's lingering server",
+                    }[how],
+                    _client_pid(client),
                 )
 
                 tool_names: list[str] = []
@@ -222,13 +420,14 @@ class ToolBundleManager:
                         # same name. Surface as a startup error — silent
                         # dispatch would be confusing. Release rather than
                         # close: another world may be mid-call on this server.
-                        _release_client(key)
+                        _release_client(key, shared)
                         raise ToolBundleStartupError(
                             f"tool bundle {name!r}: cannot register "
                             f"{entry.name!r} — {exc}"
                         ) from exc
                 started.append(_Managed(bundle=name, client=client,
-                                         tool_names=tool_names, key=key))
+                                         tool_names=tool_names, key=key,
+                                         entry=shared))
                 logger.info("[tool-bundle:%s] %d tools registered",
                             name, len(tool_names))
 
@@ -239,7 +438,7 @@ class ToolBundleManager:
             # Give back what we took before re-raising. A reference, not a
             # close: a sibling world may be holding the same server.
             for m in started:
-                _release_client(m.key)
+                _release_client(m.key, m.entry)
             raise
 
     def shutdown_all(self) -> None:
@@ -253,20 +452,28 @@ class ToolBundleManager:
         logger.info("ToolBundleManager: releasing %d tool bundle%s",
                     len(managed), "" if len(managed) == 1 else "s")
         for m in managed:
-            _release_client(m.key)
+            _release_client(m.key, m.entry)
 
     def loaded_bundles(self) -> list[str]:
         return sorted(self._managed.keys())
 
 
 def shared_client_counts() -> dict[str, int]:
-    """``{bundle: managers holding it}`` for every live shared server.
+    """``{bundle: managers holding it}`` for every cached shared server.
 
     For tests and for anyone asking the question this module was changed to
-    answer: how many servers is this process actually running?
+    answer: how many servers is this process actually running? A server parked
+    by :data:`LINGER_ENV` is running and counted as ``0``.
     """
     with _SHARED_LOCK:
         return {key[0]: shared.refs for key, shared in _SHARED.items()}
 
 
-__all__ = ["ToolBundleManager", "ToolBundleStartupError", "shared_client_counts"]
+__all__ = [
+    "LINGER_ENV",
+    "ToolBundleManager",
+    "ToolBundleStartupError",
+    "close_shared_clients",
+    "linger_enabled",
+    "shared_client_counts",
+]
